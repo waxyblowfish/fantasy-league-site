@@ -1,19 +1,27 @@
 import React, { useState, useEffect } from 'react';
-import { Trophy, TrendingUp, History, Users, Calendar, BarChart3, Info, Moon, Sun, ChevronDown, ChevronUp, Crown } from 'lucide-react';
+import { Trophy, TrendingUp, History, Users, Calendar, BarChart3, Info, Moon, Sun, ChevronDown, ChevronUp, Crown, AlertCircle, Edit2, Save, X } from 'lucide-react';
 import { SpeedInsights } from '@vercel/speed-insights/react';
+import { Analytics } from '@vercel/analytics/react';
 
 const LEAGUE_ID = '1257085009114697728';
 const API_BASE = 'https://api.sleeper.app/v1';
 const CURRENT_YEAR = '2024';
+
+// Notice Board - Edit this text to update the default notice on the home page
+const INITIAL_NOTICE = "🏈 Welcome to the 2024 season! Good luck to all teams!";
 
 export default function FantasyLeagueSite() {
   const [activeTab, setActiveTab] = useState('home');
   const [leagueData, setLeagueData] = useState(null);
   const [rosters, setRosters] = useState([]);
   const [users, setUsers] = useState([]);
+  const [players, setPlayers] = useState({});
   const [currentMatchups, setCurrentMatchups] = useState([]);
   const [previousMatchups, setPreviousMatchups] = useState([]);
+  const [allMatchups, setAllMatchups] = useState({});
   const [transactions, setTransactions] = useState([]);
+  const [draftPicks, setDraftPicks] = useState([]);
+  const [trendingPlayers, setTrendingPlayers] = useState({ add: [], drop: [] });
   const [loading, setLoading] = useState(true);
   const [currentWeek, setCurrentWeek] = useState(1);
   const [darkMode, setDarkMode] = useState(false);
@@ -32,21 +40,28 @@ export default function FantasyLeagueSite() {
     try {
       setLoading(true);
       
-      const leagueRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}`);
+      // Fetch basic league data
+      const [leagueRes, rostersRes, usersRes, playersRes] = await Promise.all([
+        fetch(`${API_BASE}/league/${LEAGUE_ID}`),
+        fetch(`${API_BASE}/league/${LEAGUE_ID}/rosters`),
+        fetch(`${API_BASE}/league/${LEAGUE_ID}/users`),
+        fetch(`${API_BASE}/players/nfl`)
+      ]);
+
       const league = await leagueRes.json();
-      setLeagueData(league);
-      
-      const rostersRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}/rosters`);
       const rostersData = await rostersRes.json();
-      setRosters(rostersData);
-      
-      const usersRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}/users`);
       const usersData = await usersRes.json();
+      const playersData = await playersRes.json();
+
+      setLeagueData(league);
+      setRosters(rostersData);
       setUsers(usersData);
+      setPlayers(playersData);
       
       const week = league.settings.leg || 1;
       setCurrentWeek(week);
       
+      // Fetch current and previous week matchups
       if (week <= 18) {
         const currentRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${week}`);
         const current = await currentRes.json();
@@ -59,10 +74,71 @@ export default function FantasyLeagueSite() {
         setPreviousMatchups(prev || []);
       }
 
-      // Fetch recent transactions
-      const transRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}/transactions/${week}`);
-      const transData = await transRes.json();
-      setTransactions(transData || []);
+      // Fetch all matchups for history
+      const matchupsPromises = [];
+      for (let w = 1; w <= week; w++) {
+        matchupsPromises.push(
+          fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${w}`)
+            .then(res => res.json())
+            .then(data => ({ week: w, matchups: data }))
+        );
+      }
+      const allMatchupsData = await Promise.all(matchupsPromises);
+      const matchupsObj = {};
+      allMatchupsData.forEach(({ week, matchups }) => {
+        matchupsObj[week] = matchups;
+      });
+      setAllMatchups(matchupsObj);
+
+      // Fetch recent transactions (last 3 weeks)
+      const transPromises = [];
+      for (let w = Math.max(1, week - 2); w <= week; w++) {
+        transPromises.push(fetch(`${API_BASE}/league/${LEAGUE_ID}/transactions/${w}`));
+      }
+      const transResponses = await Promise.all(transPromises);
+      const transData = await Promise.all(transResponses.map(r => r.json()));
+      const allTrans = transData.flat().filter(Boolean);
+      setTransactions(allTrans);
+
+      // Calculate trending players from transactions
+      const adds = {};
+      const drops = {};
+      allTrans.forEach(trans => {
+        if (trans.type === 'waiver' || trans.type === 'free_agent') {
+          trans.adds && Object.keys(trans.adds).forEach(playerId => {
+            adds[playerId] = (adds[playerId] || 0) + 1;
+          });
+          trans.drops && Object.keys(trans.drops).forEach(playerId => {
+            drops[playerId] = (drops[playerId] || 0) + 1;
+          });
+        }
+      });
+      
+      const trendingAdds = Object.entries(adds)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 10)
+        .map(([playerId, count]) => ({ playerId, count }));
+      
+      const trendingDrops = Object.entries(drops)
+        .sort(([,a], [,b]) => b - a)
+        .slice(0, 10)
+        .map(([playerId, count]) => ({ playerId, count }));
+      
+      setTrendingPlayers({ add: trendingAdds, drop: trendingDrops });
+
+      // Fetch draft data
+      try {
+        const draftsRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}/drafts`);
+        const drafts = await draftsRes.json();
+        if (drafts && drafts.length > 0) {
+          const draftId = drafts[0].draft_id;
+          const picksRes = await fetch(`${API_BASE}/draft/${draftId}/picks`);
+          const picks = await picksRes.json();
+          setDraftPicks(picks || []);
+        }
+      } catch (err) {
+        console.error('Error fetching draft data:', err);
+      }
       
     } catch (error) {
       console.error('Error fetching league data:', error);
@@ -88,6 +164,22 @@ export default function FantasyLeagueSite() {
     return avatarId ? `https://sleepercdn.com/avatars/thumbs/${avatarId}` : null;
   };
 
+  const getPlayerName = (playerId) => {
+    return players[playerId]?.full_name || playerId;
+  };
+
+  const getPlayerPosition = (playerId) => {
+    return players[playerId]?.position || 'N/A';
+  };
+
+  const getPlayerTeam = (playerId) => {
+    return players[playerId]?.team || 'FA';
+  };
+
+  const isPlayerRostered = (playerId) => {
+    return rosters.some(roster => roster.players && roster.players.includes(playerId));
+  };
+
   if (loading) {
     return (
       <div className={`min-h-screen flex items-center justify-center ${darkMode ? 'bg-gray-900' : 'bg-gray-100'}`}>
@@ -102,6 +194,7 @@ export default function FantasyLeagueSite() {
   return (
     <div className={`min-h-screen ${darkMode ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-900'}`}>
       <SpeedInsights />
+      <Analytics />
       
       {/* Navigation */}
       <nav className={`${darkMode ? 'bg-gray-800 shadow-xl' : 'bg-white shadow-lg'} sticky top-0 z-50`}>
@@ -179,11 +272,76 @@ export default function FantasyLeagueSite() {
         {activeTab === 'home' && <HomePage darkMode={darkMode} leagueData={leagueData} rosters={rosters} currentWeek={currentWeek} setActiveTab={setActiveTab} />}
         {activeTab === 'info' && <LeagueInfoPage darkMode={darkMode} leagueData={leagueData} rosters={rosters} users={users} />}
         {activeTab === 'current' && <CurrentPage darkMode={darkMode} currentWeek={currentWeek} currentMatchups={currentMatchups} previousMatchups={previousMatchups} rosters={rosters} getTeamName={getTeamName} getAvatar={getAvatar} />}
-        {activeTab === 'waivers' && <WaiversPage darkMode={darkMode} transactions={transactions} getTeamName={getTeamName} />}
-        {activeTab === 'draft' && <DraftPage darkMode={darkMode} rosters={rosters} users={users} getTeamName={getTeamName} />}
-        {activeTab === 'standings' && <StandingsPage darkMode={darkMode} rosters={rosters} getTeamName={getTeamName} currentWeek={currentWeek} />}
-        {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} getTeamName={getTeamName} getAvatar={getAvatar} />}
+        {activeTab === 'waivers' && <WaiversPage darkMode={darkMode} transactions={transactions} trendingPlayers={trendingPlayers} players={players} rosters={rosters} getTeamName={getTeamName} getPlayerName={getPlayerName} getPlayerPosition={getPlayerPosition} getPlayerTeam={getPlayerTeam} isPlayerRostered={isPlayerRostered} />}
+        {activeTab === 'draft' && <DraftPage darkMode={darkMode} draftPicks={draftPicks} rosters={rosters} users={users} getTeamName={getTeamName} getPlayerName={getPlayerName} players={players} />}
+        {activeTab === 'standings' && <StandingsPage darkMode={darkMode} rosters={rosters} getTeamName={getTeamName} currentWeek={currentWeek} leagueData={leagueData} />}
+        {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} allMatchups={allMatchups} getTeamName={getTeamName} getAvatar={getAvatar} />}
       </div>
+    </div>
+  );
+}
+
+// Home Page Component
+// Notice Board Component  
+function NoticeBoard({ darkMode }) {
+  const [notice, setNotice] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState('');
+
+  useEffect(() => {
+    const saved = localStorage.getItem('leagueNotice');
+    setNotice(saved || INITIAL_NOTICE);
+  }, []);
+
+  const handleSave = () => {
+    localStorage.setItem('leagueNotice', editText);
+    setNotice(editText);
+    setIsEditing(false);
+  };
+
+  const handleEdit = () => {
+    setEditText(notice);
+    setIsEditing(true);
+  };
+
+  return (
+    <div className={`${darkMode ? 'bg-blue-900/20 border-blue-700' : 'bg-blue-50 border-blue-200'} border-2 rounded-lg p-4 sm:p-6`}>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3 flex-1">
+          <AlertCircle className="w-6 h-6 text-blue-600 flex-shrink-0 mt-1" />
+          <div className="flex-1">
+            <h3 className="font-bold text-lg mb-2">📢 League Notice Board</h3>
+            {isEditing ? (
+              <textarea
+                value={editText}
+                onChange={(e) => setEditText(e.target.value)}
+                className={`w-full p-2 rounded border ${darkMode ? 'bg-gray-800 border-gray-600 text-white' : 'bg-white border-gray-300'} text-sm sm:text-base`}
+                rows={3}
+                placeholder="Enter your notice here..."
+              />
+            ) : (
+              <p className={`${darkMode ? 'text-gray-300' : 'text-gray-700'} text-sm sm:text-base whitespace-pre-wrap`}>{notice}</p>
+            )}
+          </div>
+        </div>
+        <div className="flex gap-2">
+          {isEditing ? (
+            <>
+              <button onClick={handleSave} className="p-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition">
+                <Save className="w-4 h-4" />
+              </button>
+              <button onClick={() => setIsEditing(false)} className="p-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition">
+                <X className="w-4 h-4" />
+              </button>
+            </>
+          ) : (
+            <button onClick={handleEdit} className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition">
+              <Edit2 className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      </div>
+      <p className="text-xs mt-2 text-gray-500">Click the edit button to update this notice. Changes are saved locally in your browser.</p>
     </div>
   );
 }
@@ -199,6 +357,8 @@ function HomePage({ darkMode, leagueData, rosters, currentWeek, setActiveTab }) 
         </div>
         <p className="text-lg sm:text-xl opacity-90">Season {leagueData?.season || '2024'} • {rosters.length} Teams</p>
       </div>
+
+      <NoticeBoard darkMode={darkMode} />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
         <QuickLinkCard title="League Info" icon={Info} tab="info" setActiveTab={setActiveTab} darkMode={darkMode} color="blue" />
@@ -420,7 +580,7 @@ function StandingsTable({ rosters, getTeamName, darkMode, showPlayoffLine }) {
             <tr 
               key={roster.roster_id} 
               className={`border-b ${darkMode ? 'border-gray-700 hover:bg-gray-700' : 'border-gray-200 hover:bg-gray-50'} ${
-                showPlayoffLine && idx === 5 ? 'border-b-4 border-blue-500' : ''
+                showPlayoffLine && idx === 5 ? 'border-b-4 border-red-500' : ''
               }`}
             >
               <td className="p-2 font-bold text-sm sm:text-base">{idx + 1}</td>
@@ -434,7 +594,7 @@ function StandingsTable({ rosters, getTeamName, darkMode, showPlayoffLine }) {
       </table>
       {showPlayoffLine && (
         <p className={`text-xs sm:text-sm mt-2 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-          Blue line indicates playoff cutoff
+          Red line indicates playoff cutoff
         </p>
       )}
     </div>
@@ -547,88 +707,663 @@ function AIWeeklyRecap({ darkMode, matchups, getTeamName, week }) {
 }
 
 // Waivers Page - Placeholder (needs more API integration)
-function WaiversPage({ darkMode, transactions, getTeamName }) {
+function WaiversPage({ darkMode, transactions, trendingPlayers, players, rosters, getTeamName, getPlayerName, getPlayerPosition, getPlayerTeam, isPlayerRostered }) {
+  const [positionFilter, setPositionFilter] = useState('ALL');
+  
+  // Get top available players by position
+  const getTopAvailablePlayers = (position = 'ALL', limit = 10) => {
+    return Object.entries(players)
+      .filter(([playerId, player]) => {
+        if (isPlayerRostered(playerId)) return false;
+        if (position !== 'ALL' && player.position !== position) return false;
+        if (!player.fantasy_positions || player.fantasy_positions.length === 0) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        // Sort by fantasy points if available, otherwise by position ranking
+        const aPoints = a[1].stats?.pts_ppr || 0;
+        const bPoints = b[1].stats?.pts_ppr || 0;
+        return bPoints - aPoints;
+      })
+      .slice(0, limit)
+      .map(([playerId]) => playerId);
+  };
+
+  const positions = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DEF'];
+  const availablePlayers = getTopAvailablePlayers(positionFilter, 10);
+
   return (
     <div className="space-y-6 sm:space-y-8">
       <h1 className="text-2xl sm:text-3xl font-bold">Waivers & Free Agents</h1>
       
+      {/* Trending Players */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+          <h2 className="text-xl font-bold mb-4 text-green-600">📈 Trending Adds</h2>
+          <div className="space-y-2">
+            {trendingPlayers.add.slice(0, 5).map(({ playerId, count }) => (
+              <div key={playerId} className={`flex items-center justify-between p-2 rounded ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
+                <div>
+                  <p className="font-semibold">{getPlayerName(playerId)}</p>
+                  <p className="text-sm text-gray-500">{getPlayerPosition(playerId)} - {getPlayerTeam(playerId)}</p>
+                </div>
+                <span className="text-sm font-medium text-green-600">{count} adds</span>
+              </div>
+            ))}
+            {trendingPlayers.add.length === 0 && (
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>No trending adds this week</p>
+            )}
+          </div>
+        </div>
+
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+          <h2 className="text-xl font-bold mb-4 text-red-600">📉 Trending Drops</h2>
+          <div className="space-y-2">
+            {trendingPlayers.drop.slice(0, 5).map(({ playerId, count }) => (
+              <div key={playerId} className={`flex items-center justify-between p-2 rounded ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
+                <div>
+                  <p className="font-semibold">{getPlayerName(playerId)}</p>
+                  <p className="text-sm text-gray-500">{getPlayerPosition(playerId)} - {getPlayerTeam(playerId)}</p>
+                </div>
+                <span className="text-sm font-medium text-red-600">{count} drops</span>
+              </div>
+            ))}
+            {trendingPlayers.drop.length === 0 && (
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>No trending drops this week</p>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Top Available Players */}
+      <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-4">
+          <h2 className="text-xl font-bold">Top Available Players</h2>
+          <div className="flex gap-2 flex-wrap">
+            {positions.map(pos => (
+              <button
+                key={pos}
+                onClick={() => setPositionFilter(pos)}
+                className={`px-3 py-1 rounded text-sm font-medium transition ${
+                  positionFilter === pos
+                    ? 'bg-blue-600 text-white'
+                    : darkMode ? 'bg-gray-700 text-gray-300 hover:bg-gray-600' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                }`}
+              >
+                {pos}
+              </button>
+            ))}
+          </div>
+        </div>
+        
+        <div className="space-y-2">
+          {availablePlayers.map(playerId => (
+            <div key={playerId} className={`flex items-center justify-between p-3 rounded border ${darkMode ? 'border-gray-700 bg-gray-700/30' : 'border-gray-200 bg-gray-50'}`}>
+              <div>
+                <p className="font-semibold">{getPlayerName(playerId)}</p>
+                <p className="text-sm text-gray-500">{getPlayerPosition(playerId)} - {getPlayerTeam(playerId)}</p>
+              </div>
+            </div>
+          ))}
+          {availablePlayers.length === 0 && (
+            <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>No available players in this category</p>
+          )}
+        </div>
+      </div>
+
+      {/* Recent Transactions */}
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
         <h2 className="text-xl sm:text-2xl font-bold mb-4">Recent Transactions</h2>
-        <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm sm:text-base`}>Transaction data coming soon...</p>
+        <div className="space-y-3">
+          {transactions.slice(0, 20).map((trans, idx) => (
+            <div key={idx} className={`p-3 rounded border-l-4 ${
+              trans.type === 'waiver' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' :
+              trans.type === 'free_agent' ? 'border-green-500 bg-green-50 dark:bg-green-900/20' :
+              trans.type === 'trade' ? 'border-purple-500 bg-purple-50 dark:bg-purple-900/20' :
+              'border-gray-500 bg-gray-50 dark:bg-gray-900/20'
+            }`}>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <p className="font-semibold capitalize">{trans.type.replace('_', ' ')}</p>
+                  <div className="text-sm mt-1">
+                    {trans.adds && Object.keys(trans.adds).length > 0 && (
+                      <p className="text-green-600 dark:text-green-400">
+                        + Added: {Object.keys(trans.adds).map(pid => getPlayerName(pid)).join(', ')}
+                      </p>
+                    )}
+                    {trans.drops && Object.keys(trans.drops).length > 0 && (
+                      <p className="text-red-600 dark:text-red-400">
+                        - Dropped: {Object.keys(trans.drops).map(pid => getPlayerName(pid)).join(', ')}
+                      </p>
+                    )}
+                  </div>
+                  {trans.roster_ids && trans.roster_ids.length > 0 && (
+                    <p className="text-xs text-gray-600 dark:text-gray-400 mt-1">
+                      By: {trans.roster_ids.map(rid => getTeamName(rid)).join(', ')}
+                    </p>
+                  )}
+                </div>
+                <div className="text-xs text-gray-500">
+                  {new Date(trans.created).toLocaleDateString()}
+                </div>
+              </div>
+            </div>
+          ))}
+          {transactions.length === 0 && (
+            <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>No recent transactions</p>
+          )}
+        </div>
       </div>
     </div>
   );
 }
 
-// Draft Page - Placeholder
-function DraftPage({ darkMode, rosters, users, getTeamName }) {
+// Draft Page with full functionality
+function DraftPage({ darkMode, draftPicks, rosters, users, getTeamName, getPlayerName, players }) {
+  const [expandedTeam, setExpandedTeam] = useState(null);
+  
+  // Keeper cost calculator function
+  const calculateKeeperCost = (draftRound, yearsKept) => {
+    if (!draftRound || draftRound === 0) {
+      // Undrafted/FA player - starts at 15th round
+      const rounds = [15, 12, 9, 6, 4, 2, 1];
+      return rounds[Math.min(yearsKept, rounds.length - 1)];
+    }
+    
+    // Drafted player
+    let cost = draftRound;
+    for (let i = 0; i < yearsKept; i++) {
+      if (cost > 5) {
+        // Rounds 6+ decrease by 3 each year
+        cost = Math.max(1, cost - 3);
+      } else {
+        // Rounds 1-5 decrease by 2 each year
+        cost = Math.max(1, cost - 2);
+      }
+      if (cost === 1) break;
+    }
+    return cost;
+  };
+
+  // Organize draft picks by round and pick
+  const draftBoard = draftPicks.reduce((board, pick) => {
+    if (!board[pick.round]) board[pick.round] = [];
+    board[pick.round][pick.draft_slot - 1] = pick;
+    return board;
+  }, {});
+
+  const rounds = Object.keys(draftBoard).sort((a, b) => a - b);
+  const numTeams = rosters.length;
+
   return (
     <div className="space-y-6 sm:space-y-8">
       <h1 className="text-2xl sm:text-3xl font-bold">Draft & Keepers</h1>
       
+      {/* Keeper Rules */}
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
         <h2 className="text-xl sm:text-2xl font-bold mb-4">Keeper Rules</h2>
         <div className={`space-y-2 text-sm sm:text-base ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
           <p><strong>• Keep up to 2 players</strong></p>
+          <p><strong>• First year:</strong> Same round as drafted</p>
           <p><strong>• Rounds 6-15:</strong> Cost increases by 3 rounds per year (10th → 7th → 4th → 2nd → 1st)</p>
           <p><strong>• Rounds 1-5:</strong> Cost increases by 2 rounds per year (5th → 3rd → 1st)</p>
-          <p><strong>• Undrafted/FA:</strong> Start at 15th round</p>
+          <p><strong>• Undrafted/FA:</strong> Start at 15th round, then 12th → 9th → 6th → 4th → 2nd → 1st</p>
+          <p><strong>• Maximum:</strong> Once at 1st round cost for one year, then must release</p>
+          <p><strong>• Tie-breaker:</strong> If two players cost same pick, lower ADP costs +1 round</p>
         </div>
       </div>
 
+      {/* Draft Board */}
+      {draftPicks.length > 0 ? (
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6 overflow-x-auto`}>
+          <h2 className="text-xl sm:text-2xl font-bold mb-4">Draft Board</h2>
+          <table className="w-full text-xs sm:text-sm">
+            <thead>
+              <tr className={`border-b-2 ${darkMode ? 'border-gray-600' : 'border-gray-300'}`}>
+                <th className="p-2 text-left">Rd</th>
+                {Array.from({ length: numTeams }, (_, i) => (
+                  <th key={i} className="p-2 text-center">Pick {i + 1}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rounds.map(round => (
+                <tr key={round} className={`border-b ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
+                  <td className="p-2 font-bold">{round}</td>
+                  {Array.from({ length: numTeams }, (_, i) => {
+                    const pick = draftBoard[round][i];
+                    return (
+                      <td key={i} className="p-2 text-center">
+                        {pick ? (
+                          <div className="text-xs">
+                            <div className="font-semibold truncate">{getPlayerName(pick.player_id)}</div>
+                            <div className="text-gray-500">{players[pick.player_id]?.position || ''}</div>
+                          </div>
+                        ) : (
+                          <span className="text-gray-400">-</span>
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+          <h2 className="text-xl sm:text-2xl font-bold mb-4">Draft Board</h2>
+          <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Draft data not yet available for this season.</p>
+        </div>
+      )}
+
+      {/* Team Rosters with Keeper Costs */}
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
-        <h2 className="text-xl sm:text-2xl font-bold mb-4">Draft Board</h2>
-        <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm sm:text-base`}>Draft data coming soon...</p>
+        <h2 className="text-xl sm:text-2xl font-bold mb-4">Team Rosters & Keeper Costs</h2>
+        <div className="space-y-2">
+          {rosters.map(roster => {
+            const isExpanded = expandedTeam === roster.roster_id;
+            return (
+              <div key={roster.roster_id} className={`border rounded-lg ${darkMode ? 'border-gray-700' : 'border-gray-300'}`}>
+                <button
+                  onClick={() => setExpandedTeam(isExpanded ? null : roster.roster_id)}
+                  className={`w-full flex items-center justify-between p-4 ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-50'} transition`}
+                >
+                  <span className="font-bold">{getTeamName(roster.roster_id)}</span>
+                  {isExpanded ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+                </button>
+                
+                {isExpanded && (
+                  <div className="p-4 border-t ${darkMode ? 'border-gray-700 bg-gray-900/50' : 'border-gray-300 bg-gray-50'}">
+                    <div className="space-y-2">
+                      {roster.players && roster.players.map(playerId => {
+                        const player = players[playerId];
+                        const draftPick = draftPicks.find(p => p.player_id === playerId);
+                        const draftRound = draftPick?.round || 0;
+                        
+                        return (
+                          <div key={playerId} className={`flex items-center justify-between p-2 rounded ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
+                            <div>
+                              <p className="font-semibold">{getPlayerName(playerId)}</p>
+                              <p className="text-sm text-gray-500">{player?.position || 'N/A'} - {player?.team || 'FA'}</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-xs text-gray-500">Keeper Cost (Year 1):</p>
+                              <p className="font-bold">
+                                {draftRound === 0 ? '15th round' : `${draftRound}${draftRound === 1 ? 'st' : draftRound === 2 ? 'nd' : draftRound === 3 ? 'rd' : 'th'} round`}
+                              </p>
+                              <p className="text-xs text-gray-500 mt-1">
+                                Year 2: {calculateKeeperCost(draftRound, 1)}th, 
+                                Year 3: {calculateKeeperCost(draftRound, 2)}th
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Keeper Cost Calculator */}
+      <KeeperCalculator darkMode={darkMode} calculateKeeperCost={calculateKeeperCost} />
+    </div>
+  );
+}
+
+// Keeper Calculator Component
+function KeeperCalculator({ darkMode, calculateKeeperCost }) {
+  const [draftRound, setDraftRound] = useState(10);
+  const [isUndrafted, setIsUndrafted] = useState(false);
+  
+  const years = [0, 1, 2, 3, 4, 5, 6];
+  
+  return (
+    <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+      <h2 className="text-xl sm:text-2xl font-bold mb-4">Keeper Cost Calculator</h2>
+      
+      <div className="mb-6 space-y-4">
+        <div>
+          <label className="flex items-center gap-2 mb-2">
+            <input
+              type="checkbox"
+              checked={isUndrafted}
+              onChange={(e) => setIsUndrafted(e.target.checked)}
+              className="w-4 h-4"
+            />
+            <span className="font-medium">Undrafted / Free Agent</span>
+          </label>
+        </div>
+        
+        {!isUndrafted && (
+          <div>
+            <label className="block font-medium mb-2">Original Draft Round:</label>
+            <input
+              type="number"
+              min="1"
+              max="15"
+              value={draftRound}
+              onChange={(e) => setDraftRound(parseInt(e.target.value))}
+              className={`border rounded px-3 py-2 w-32 ${darkMode ? 'bg-gray-700 border-gray-600 text-white' : 'bg-white border-gray-300'}`}
+            />
+          </div>
+        )}
+      </div>
+
+      <div className={`${darkMode ? 'bg-gradient-to-r from-blue-900/30 to-purple-900/30' : 'bg-gradient-to-r from-blue-50 to-purple-50'} rounded-lg p-6 mb-6`}>
+        <h3 className="font-bold text-lg mb-4 text-center">Keeper Cost Over Time</h3>
+        <div className="grid grid-cols-7 gap-2">
+          {years.map(year => {
+            const cost = calculateKeeperCost(isUndrafted ? 0 : draftRound, year);
+            const canKeep = !(draftRound > 0 && cost === 1 && year > 0);
+            
+            return (
+              <div key={year} className="text-center">
+                <div className={`rounded-lg p-3 sm:p-4 ${canKeep ? darkMode ? 'bg-gray-800 shadow-lg' : 'bg-white shadow-md' : 'bg-gray-200 dark:bg-gray-700 opacity-50'}`}>
+                  <p className="text-xs sm:text-sm text-gray-600 dark:text-gray-400 mb-1">Year {year + 1}</p>
+                  <p className={`text-xl sm:text-2xl font-bold ${canKeep ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400'}`}>
+                    {canKeep ? (cost === 1 ? '1st' : `${cost}th`) : 'N/A'}
+                  </p>
+                  {!canKeep && year > 0 && (
+                    <p className="text-xs text-red-600 dark:text-red-400 mt-1">Can't keep</p>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className={`border-t pt-4 ${darkMode ? 'border-gray-700' : 'border-gray-300'}`}>
+        <h3 className="font-bold mb-2">How It Works:</h3>
+        <div className={`space-y-2 text-sm ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+          <p><strong>Drafted Players (Rounds 6-15):</strong> Start at draft round, decrease by 3 rounds/year until reaching rounds 1-5.</p>
+          <p><strong>Drafted Players (Rounds 1-5):</strong> Decrease by 2 rounds/year until reaching 1st round.</p>
+          <p><strong>Free Agents:</strong> Start at 15th, decrease by 3 until round 6, then by 2.</p>
+          <p><strong>Final Year:</strong> Once at 1st round cost for one year, cannot be kept anymore.</p>
+          <p className="text-xs italic mt-3">Example: 10th round pick → 10th → 7th → 4th → 2nd → 1st (final year)</p>
+        </div>
       </div>
     </div>
   );
 }
 
-// Standings Page - Placeholder
-function StandingsPage({ darkMode, rosters, getTeamName, currentWeek }) {
+// Standings Page with projections
+function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData }) {
+  const regularSeasonWeeks = leagueData?.settings?.playoff_week_start ? leagueData.settings.playoff_week_start - 1 : 14;
+  const weeksRemaining = Math.max(0, regularSeasonWeeks - currentWeek);
+  
+  // Calculate projected final records
+  const projectionsData = rosters.map(roster => {
+    const wins = roster.settings.wins || 0;
+    const losses = roster.settings.losses || 0;
+    const ties = roster.settings.ties || 0;
+    const gamesPlayed = wins + losses + ties;
+    const winPct = gamesPlayed > 0 ? wins / gamesPlayed : 0;
+    
+    // Project remaining games at current win percentage
+    const projectedWins = Math.round(wins + (weeksRemaining * winPct));
+    const projectedLosses = Math.round(losses + (weeksRemaining * (1 - winPct)));
+    
+    return {
+      rosterId: roster.roster_id,
+      currentWins: wins,
+      currentLosses: losses,
+      projectedWins,
+      projectedLosses,
+      pointsFor: roster.settings.fpts || 0,
+      pointsAgainst: roster.settings.fpts_against || 0
+    };
+  });
+
+  const sortedProjections = [...projections Data].sort((a, b) => {
+    if (b.projectedWins !== a.projectedWins) return b.projectedWins - a.projectedWins;
+    return b.pointsFor - a.pointsFor;
+  });
+
+  const playoffTeams = leagueData?.settings?.playoff_teams || 6;
+
   return (
     <div className="space-y-6 sm:space-y-8">
       <h1 className="text-2xl sm:text-3xl font-bold">Standings & Projections</h1>
       
       <StandingsTable rosters={rosters} getTeamName={getTeamName} darkMode={darkMode} showPlayoffLine={true} />
 
+      {weeksRemaining > 0 && (
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+          <h2 className="text-xl sm:text-2xl font-bold mb-4">Projected Final Standings</h2>
+          <p className={`text-sm mb-4 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+            Based on current win percentage with {weeksRemaining} weeks remaining
+          </p>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className={`border-b-2 ${darkMode ? 'border-gray-600' : 'border-gray-300'}`}>
+                  <th className="text-left p-2">Rank</th>
+                  <th className="text-left p-2">Team</th>
+                  <th className="text-center p-2">Current</th>
+                  <th className="text-center p-2">Projected</th>
+                  <th className="text-center p-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedProjections.map((proj, idx) => (
+                  <tr key={proj.rosterId} className={`border-b ${darkMode ? 'border-gray-700' : 'border-gray-200'} ${idx === playoffTeams - 1 ? 'border-b-4 border-red-500' : ''}`}>
+                    <td className="p-2 font-bold">{idx + 1}</td>
+                    <td className="p-2">{getTeamName(proj.rosterId)}</td>
+                    <td className="text-center p-2">{proj.currentWins}-{proj.currentLosses}</td>
+                    <td className="text-center p-2 font-bold">{proj.projectedWins}-{proj.projectedLosses}</td>
+                    <td className="text-center p-2">
+                      {idx < playoffTeams ? (
+                        <span className="text-green-600 dark:text-green-400 font-semibold">Playoffs</span>
+                      ) : (
+                        <span className="text-gray-500">Eliminated</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
-        <h2 className="text-xl sm:text-2xl font-bold mb-4">Projected Final Standings</h2>
-        <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm sm:text-base`}>Projections coming soon...</p>
+        <h2 className="text-xl sm:text-2xl font-bold mb-4">League Analytics</h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className={`p-4 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+            <h3 className="font-semibold mb-2">Highest Scorer</h3>
+            <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
+              {getTeamName(rosters.reduce((max, r) => r.settings.fpts > max.settings.fpts ? r : max, rosters[0]).roster_id)}
+            </p>
+            <p className="text-sm text-gray-500">{Math.max(...rosters.map(r => r.settings.fpts || 0)).toFixed(2)} pts</p>
+          </div>
+
+          <div className={`p-4 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+            <h3 className="font-semibold mb-2">Most Wins</h3>
+            <p className="text-2xl font-bold text-green-600 dark:text-green-400">
+              {getTeamName(rosters.reduce((max, r) => (r.settings.wins || 0) > (max.settings.wins || 0) ? r : max, rosters[0]).roster_id)}
+            </p>
+            <p className="text-sm text-gray-500">{Math.max(...rosters.map(r => r.settings.wins || 0))} wins</p>
+          </div>
+
+          <div className={`p-4 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+            <h3 className="font-semibold mb-2">Points Against</h3>
+            <p className="text-2xl font-bold text-red-600 dark:text-red-400">
+              {getTeamName(rosters.reduce((max, r) => (r.settings.fpts_against || 0) > (max.settings.fpts_against || 0) ? r : max, rosters[0]).roster_id)}
+            </p>
+            <p className="text-sm text-gray-500">{Math.max(...rosters.map(r => r.settings.fpts_against || 0)).toFixed(2)} pts</p>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-// History Page - Placeholder
-function HistoryPage({ darkMode, rosters, users, getTeamName, getAvatar }) {
+// History Page with records and season archives
+function HistoryPage({ darkMode, rosters, users, allMatchups, getTeamName, getAvatar }) {
+  const [expandedSeason, setExpandedSeason] = useState(null);
+
+  // Calculate highest score from all matchups
+  const calculateHighestScore = () => {
+    let highest = { score: 0, team: null, week: 0 };
+    Object.entries(allMatchups).forEach(([week, matchups]) => {
+      matchups?.forEach(matchup => {
+        if (matchup.points > highest.score) {
+          highest = { score: matchup.points, team: matchup.roster_id, week: parseInt(week) };
+        }
+      });
+    });
+    return highest;
+  };
+
+  // Calculate longest win streak
+  const calculateLongestStreak = () => {
+    const teamStreaks = {};
+    rosters.forEach(roster => teamStreaks[roster.roster_id] = { current: 0, longest: 0 });
+
+    const weeks = Object.keys(allMatchups).sort((a, b) => a - b);
+    weeks.forEach(week => {
+      const matchups = allMatchups[week] || [];
+      const grouped = matchups.reduce((acc, m) => {
+        if (!acc[m.matchup_id]) acc[m.matchup_id] = [];
+        acc[m.matchup_id].push(m);
+        return acc;
+      }, {});
+
+      Object.values(grouped).forEach(pair => {
+        if (pair.length === 2) {
+          const [team1, team2] = pair;
+          const winner = team1.points > team2.points ? team1.roster_id : team2.roster_id;
+          const loser = team1.points > team2.points ? team2.roster_id : team1.roster_id;
+
+          if (teamStreaks[winner]) {
+            teamStreaks[winner].current++;
+            teamStreaks[winner].longest = Math.max(teamStreaks[winner].longest, teamStreaks[winner].current);
+          }
+          if (teamStreaks[loser]) {
+            teamStreaks[loser].current = 0;
+          }
+        }
+      });
+    });
+
+    let longestStreak = { team: null, streak: 0 };
+    Object.entries(teamStreaks).forEach(([rosterId, data]) => {
+      if (data.longest > longestStreak.streak) {
+        longestStreak = { team: parseInt(rosterId), streak: data.longest };
+      }
+    });
+
+    return longestStreak;
+  };
+
+  const highestScore = calculateHighestScore();
+  const longestStreak = calculateLongestStreak();
+
   return (
     <div className="space-y-6 sm:space-y-8">
       <h1 className="text-2xl sm:text-3xl font-bold">League History</h1>
       
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
-        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center`}>
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-yellow-500`}>
           <Crown className="w-12 h-12 text-yellow-500 mx-auto mb-2" />
-          <h3 className="font-bold text-lg">Most Championships</h3>
-          <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm`}>Coming soon...</p>
+          <h3 className="font-bold text-lg mb-2">League Champion 👑</h3>
+          <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">2024 Season</p>
+          <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>In Progress...</p>
         </div>
 
-        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center`}>
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-blue-500`}>
           <Trophy className="w-12 h-12 text-blue-500 mx-auto mb-2" />
-          <h3 className="font-bold text-lg">Highest Score</h3>
-          <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm`}>Coming soon...</p>
+          <h3 className="font-bold text-lg mb-2">Highest Score</h3>
+          {highestScore.team ? (
+            <>
+              <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{highestScore.score.toFixed(2)} pts</p>
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>
+                {getTeamName(highestScore.team)}
+              </p>
+              <p className="text-xs text-gray-500">Week {highestScore.week}</p>
+            </>
+          ) : (
+            <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm`}>No data yet</p>
+          )}
         </div>
 
-        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center`}>
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-green-500`}>
           <TrendingUp className="w-12 h-12 text-green-500 mx-auto mb-2" />
-          <h3 className="font-bold text-lg">Longest Win Streak</h3>
-          <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm`}>Coming soon...</p>
+          <h3 className="font-bold text-lg mb-2">Longest Win Streak</h3>
+          {longestStreak.team ? (
+            <>
+              <p className="text-2xl font-bold text-green-600 dark:text-green-400">{longestStreak.streak} games</p>
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>
+                {getTeamName(longestStreak.team)}
+              </p>
+            </>
+          ) : (
+            <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm`}>No data yet</p>
+          )}
         </div>
       </div>
 
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
-        <h2 className="text-xl sm:text-2xl font-bold mb-4">Season Archives</h2>
-        <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm sm:text-base`}>Historical data coming soon...</p>
+        <h2 className="text-xl sm:text-2xl font-bold mb-4">2024 Season Week-by-Week</h2>
+        <div className="space-y-2">
+          {Object.keys(allMatchups)
+            .sort((a, b) => b - a)
+            .map(week => {
+              const isExpanded = expandedSeason === week;
+              const matchups = allMatchups[week] || [];
+              const grouped = matchups.reduce((acc, m) => {
+                if (!acc[m.matchup_id]) acc[m.matchup_id] = [];
+                acc[m.matchup_id].push(m);
+                return acc;
+              }, {});
+
+              return (
+                <div key={week} className={`border rounded-lg ${darkMode ? 'border-gray-700' : 'border-gray-300'}`}>
+                  <button
+                    onClick={() => setExpandedSeason(isExpanded ? null : week)}
+                    className={`w-full flex items-center justify-between p-4 ${darkMode ? 'hover:bg-gray-700' : 'hover:bg-gray-50'} transition`}
+                  >
+                    <span className="font-bold">Week {week}</span>
+                    {isExpanded ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
+                  </button>
+
+                  {isExpanded && (
+                    <div className={`p-4 border-t ${darkMode ? 'border-gray-700 bg-gray-900/50' : 'border-gray-300 bg-gray-50'}`}>
+                      <div className="space-y-3">
+                        {Object.values(grouped).map((pair, idx) => {
+                          if (pair.length !== 2) return null;
+                          const [team1, team2] = pair;
+                          const team1Won = team1.points > team2.points;
+
+                          return (
+                            <div key={idx} className={`p-3 rounded border ${darkMode ? 'border-gray-700' : 'border-gray-200'}`}>
+                              <div className="flex items-center justify-between">
+                                <div className={`flex-1 p-2 rounded ${team1Won ? 'bg-green-100 dark:bg-green-900/30' : 'bg-red-100 dark:bg-red-900/30'}`}>
+                                  <p className="font-semibold">{getTeamName(team1.roster_id)}</p>
+                                  <p className="text-xl font-bold">{team1.points.toFixed(2)}</p>
+                                </div>
+                                <span className="px-4 text-gray-400">VS</span>
+                                <div className={`flex-1 p-2 rounded text-right ${!team1Won ? 'bg-green-100 dark:bg-green-900/30' : 'bg-red-100 dark:bg-red-900/30'}`}>
+                                  <p className="font-semibold">{getTeamName(team2.roster_id)}</p>
+                                  <p className="text-xl font-bold">{team2.points.toFixed(2)}</p>
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+        </div>
       </div>
     </div>
   );
