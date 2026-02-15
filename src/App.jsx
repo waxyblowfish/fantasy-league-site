@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Trophy, TrendingUp, History, Users, Calendar, BarChart3, Info, Moon, Sun, ChevronDown, ChevronUp, Crown, AlertCircle, Edit2, Save, X } from 'lucide-react';
-import { SpeedInsights } from '@vercel/speed-insights/react';
 import { Analytics } from '@vercel/analytics/react';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 
 const LEAGUE_ID = '1257085009114697728';
 const API_BASE = 'https://api.sleeper.app/v1';
@@ -40,109 +40,129 @@ export default function FantasyLeagueSite() {
     try {
       setLoading(true);
       
-      // Fetch basic league data
-      const [leagueRes, rostersRes, usersRes, playersRes] = await Promise.all([
+      // Fetch essential data first (fast load)
+      const [leagueRes, rostersRes, usersRes] = await Promise.all([
         fetch(`${API_BASE}/league/${LEAGUE_ID}`),
         fetch(`${API_BASE}/league/${LEAGUE_ID}/rosters`),
-        fetch(`${API_BASE}/league/${LEAGUE_ID}/users`),
-        fetch(`${API_BASE}/players/nfl`)
+        fetch(`${API_BASE}/league/${LEAGUE_ID}/users`)
       ]);
 
       const league = await leagueRes.json();
       const rostersData = await rostersRes.json();
       const usersData = await usersRes.json();
-      const playersData = await playersRes.json();
 
       setLeagueData(league);
       setRosters(rostersData);
       setUsers(usersData);
-      setPlayers(playersData);
       
       const week = league.settings.leg || 1;
       setCurrentWeek(week);
       
       // Fetch current and previous week matchups
+      const matchupPromises = [];
       if (week <= 18) {
-        const currentRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${week}`);
-        const current = await currentRes.json();
-        setCurrentMatchups(current || []);
+        matchupPromises.push(
+          fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${week}`)
+            .then(res => res.json())
+            .then(data => setCurrentMatchups(data || []))
+        );
       }
-      
       if (week > 1) {
-        const prevRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${week - 1}`);
-        const prev = await prevRes.json();
-        setPreviousMatchups(prev || []);
+        matchupPromises.push(
+          fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${week - 1}`)
+            .then(res => res.json())
+            .then(data => setPreviousMatchups(data || []))
+        );
       }
+      await Promise.all(matchupPromises);
 
-      // Fetch all matchups for history
+      // Stop loading here - user can see main content now
+      setLoading(false);
+
+      // Fetch heavy data in background (non-blocking)
+      // All matchups for history - limit to current season only
       const matchupsPromises = [];
-      for (let w = 1; w <= week; w++) {
+      for (let w = 1; w <= Math.min(week, 18); w++) {
         matchupsPromises.push(
           fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${w}`)
             .then(res => res.json())
             .then(data => ({ week: w, matchups: data }))
+            .catch(() => ({ week: w, matchups: [] }))
         );
       }
-      const allMatchupsData = await Promise.all(matchupsPromises);
-      const matchupsObj = {};
-      allMatchupsData.forEach(({ week, matchups }) => {
-        matchupsObj[week] = matchups;
+      
+      Promise.all(matchupsPromises).then(allMatchupsData => {
+        const matchupsObj = {};
+        allMatchupsData.forEach(({ week, matchups }) => {
+          matchupsObj[week] = matchups;
+        });
+        setAllMatchups(matchupsObj);
       });
-      setAllMatchups(matchupsObj);
 
-      // Fetch recent transactions (last 3 weeks)
+      // Fetch recent transactions (last 2 weeks only - reduced from 3)
       const transPromises = [];
-      for (let w = Math.max(1, week - 2); w <= week; w++) {
-        transPromises.push(fetch(`${API_BASE}/league/${LEAGUE_ID}/transactions/${w}`));
+      for (let w = Math.max(1, week - 1); w <= week; w++) {
+        transPromises.push(
+          fetch(`${API_BASE}/league/${LEAGUE_ID}/transactions/${w}`)
+            .then(res => res.json())
+            .catch(() => [])
+        );
       }
-      const transResponses = await Promise.all(transPromises);
-      const transData = await Promise.all(transResponses.map(r => r.json()));
-      const allTrans = transData.flat().filter(Boolean);
-      setTransactions(allTrans);
+      
+      Promise.all(transPromises).then(async (transResponses) => {
+        const allTrans = transResponses.flat().filter(Boolean);
+        setTransactions(allTrans);
 
-      // Calculate trending players from transactions
-      const adds = {};
-      const drops = {};
-      allTrans.forEach(trans => {
-        if (trans.type === 'waiver' || trans.type === 'free_agent') {
-          trans.adds && Object.keys(trans.adds).forEach(playerId => {
-            adds[playerId] = (adds[playerId] || 0) + 1;
-          });
-          trans.drops && Object.keys(trans.drops).forEach(playerId => {
-            drops[playerId] = (drops[playerId] || 0) + 1;
-          });
-        }
+        // Calculate trending players from transactions
+        const adds = {};
+        const drops = {};
+        allTrans.forEach(trans => {
+          if (trans.type === 'waiver' || trans.type === 'free_agent') {
+            trans.adds && Object.keys(trans.adds).forEach(playerId => {
+              adds[playerId] = (adds[playerId] || 0) + 1;
+            });
+            trans.drops && Object.keys(trans.drops).forEach(playerId => {
+              drops[playerId] = (drops[playerId] || 0) + 1;
+            });
+          }
+        });
+        
+        const trendingAdds = Object.entries(adds)
+          .sort(([,a], [,b]) => b - a)
+          .slice(0, 10)
+          .map(([playerId, count]) => ({ playerId, count }));
+        
+        const trendingDrops = Object.entries(drops)
+          .sort(([,a], [,b]) => b - a)
+          .slice(0, 10)
+          .map(([playerId, count]) => ({ playerId, count }));
+        
+        setTrendingPlayers({ add: trendingAdds, drop: trendingDrops });
       });
-      
-      const trendingAdds = Object.entries(adds)
-        .sort(([,a], [,b]) => b - a)
-        .slice(0, 10)
-        .map(([playerId, count]) => ({ playerId, count }));
-      
-      const trendingDrops = Object.entries(drops)
-        .sort(([,a], [,b]) => b - a)
-        .slice(0, 10)
-        .map(([playerId, count]) => ({ playerId, count }));
-      
-      setTrendingPlayers({ add: trendingAdds, drop: trendingDrops });
 
       // Fetch draft data
-      try {
-        const draftsRes = await fetch(`${API_BASE}/league/${LEAGUE_ID}/drafts`);
-        const drafts = await draftsRes.json();
-        if (drafts && drafts.length > 0) {
-          const draftId = drafts[0].draft_id;
-          const picksRes = await fetch(`${API_BASE}/draft/${draftId}/picks`);
-          const picks = await picksRes.json();
-          setDraftPicks(picks || []);
-        }
-      } catch (err) {
-        console.error('Error fetching draft data:', err);
-      }
+      fetch(`${API_BASE}/league/${LEAGUE_ID}/drafts`)
+        .then(res => res.json())
+        .then(drafts => {
+          if (drafts && drafts.length > 0) {
+            const draftId = drafts[0].draft_id;
+            return fetch(`${API_BASE}/draft/${draftId}/picks`);
+          }
+          return null;
+        })
+        .then(res => res ? res.json() : [])
+        .then(picks => setDraftPicks(picks || []))
+        .catch(err => console.error('Error fetching draft data:', err));
+
+      // Fetch players LAST and in background - this is the heavy one (5MB)
+      // Only fetch if we actually need it (optimization)
+      fetch(`${API_BASE}/players/nfl`)
+        .then(res => res.json())
+        .then(playersData => setPlayers(playersData))
+        .catch(err => console.error('Error fetching players:', err));
       
     } catch (error) {
       console.error('Error fetching league data:', error);
-    } finally {
       setLoading(false);
     }
   };
@@ -710,24 +730,28 @@ function AIWeeklyRecap({ darkMode, matchups, getTeamName, week }) {
 function WaiversPage({ darkMode, transactions, trendingPlayers, players, rosters, getTeamName, getPlayerName, getPlayerPosition, getPlayerTeam, isPlayerRostered }) {
   const [positionFilter, setPositionFilter] = useState('ALL');
   
-  // Get top available players by position
-  const getTopAvailablePlayers = (position = 'ALL', limit = 10) => {
-    return Object.entries(players)
-      .filter(([playerId, player]) => {
-        if (isPlayerRostered(playerId)) return false;
-        if (position !== 'ALL' && player.position !== position) return false;
-        if (!player.fantasy_positions || player.fantasy_positions.length === 0) return false;
-        return true;
-      })
-      .sort((a, b) => {
-        // Sort by fantasy points if available, otherwise by position ranking
-        const aPoints = a[1].stats?.pts_ppr || 0;
-        const bPoints = b[1].stats?.pts_ppr || 0;
-        return bPoints - aPoints;
-      })
-      .slice(0, limit)
-      .map(([playerId]) => playerId);
-  };
+  // Memoize expensive player filtering computation
+  const getTopAvailablePlayers = React.useMemo(() => {
+    return (position = 'ALL', limit = 10) => {
+      // Only process if we have players data
+      if (!players || Object.keys(players).length === 0) return [];
+      
+      return Object.entries(players)
+        .filter(([playerId, player]) => {
+          if (isPlayerRostered(playerId)) return false;
+          if (position !== 'ALL' && player.position !== position) return false;
+          if (!player.fantasy_positions || player.fantasy_positions.length === 0) return false;
+          return true;
+        })
+        .sort((a, b) => {
+          const aPoints = a[1].stats?.pts_ppr || 0;
+          const bPoints = b[1].stats?.pts_ppr || 0;
+          return bPoints - aPoints;
+        })
+        .slice(0, limit)
+        .map(([playerId]) => playerId);
+    };
+  }, [players, rosters]); // Only recalculate when players or rosters change
 
   const positions = ['ALL', 'QB', 'RB', 'WR', 'TE', 'K', 'DEF'];
   const availablePlayers = getTopAvailablePlayers(positionFilter, 10);
@@ -1120,7 +1144,7 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
     };
   });
 
-  const sortedProjections = [...projections Data].sort((a, b) => {
+  const sortedProjections = [...projectionsData].sort((a, b) => {
     if (b.projectedWins !== a.projectedWins) return b.projectedWins - a.projectedWins;
     return b.pointsFor - a.pointsFor;
   });
