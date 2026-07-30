@@ -37,6 +37,7 @@ export default function FantasyLeagueSite() {
   const [allMatchups, setAllMatchups] = useState({});
   const [transactions, setTransactions] = useState([]);
   const [draftPicks, setDraftPicks] = useState([]);
+  const [winnersBracket, setWinnersBracket] = useState([]);
   const [trendingPlayers, setTrendingPlayers] = useState({ add: [], drop: [] });
   const [loading, setLoading] = useState(true);
   const [currentWeek, setCurrentWeek] = useState(0);
@@ -155,36 +156,25 @@ export default function FantasyLeagueSite() {
         );
       }
       
-      Promise.all(transPromises).then(async (transResponses) => {
+      Promise.all(transPromises).then((transResponses) => {
         const allTrans = transResponses.flat().filter(Boolean);
         setTransactions(allTrans);
-
-        // Calculate trending players from transactions
-        const adds = {};
-        const drops = {};
-        allTrans.forEach(trans => {
-          if (trans.type === 'waiver' || trans.type === 'free_agent') {
-            trans.adds && Object.keys(trans.adds).forEach(playerId => {
-              adds[playerId] = (adds[playerId] || 0) + 1;
-            });
-            trans.drops && Object.keys(trans.drops).forEach(playerId => {
-              drops[playerId] = (drops[playerId] || 0) + 1;
-            });
-          }
-        });
-        
-        const trendingAdds = Object.entries(adds)
-          .sort(([,a], [,b]) => b - a)
-          .slice(0, 10)
-          .map(([playerId, count]) => ({ playerId, count }));
-        
-        const trendingDrops = Object.entries(drops)
-          .sort(([,a], [,b]) => b - a)
-          .slice(0, 10)
-          .map(([playerId, count]) => ({ playerId, count }));
-        
-        setTrendingPlayers({ add: trendingAdds, drop: trendingDrops });
       });
+
+      // Trending adds/drops: use Sleeper's own global trending endpoint,
+      // which reflects add/drop activity across ALL Sleeper leagues (not
+      // just this one) over the last 24 hours. This is the same data
+      // Sleeper's own app shows. Note: ESPN and Yahoo don't expose a public,
+      // key-free trending API the way Sleeper does, so this covers Sleeper's
+      // platform-wide activity rather than a true cross-platform blend.
+      Promise.all([
+        fetch(`${API_BASE}/players/nfl/trending/add?lookback_hours=24&limit=25`).then(res => res.json()).catch(() => []),
+        fetch(`${API_BASE}/players/nfl/trending/drop?lookback_hours=24&limit=25`).then(res => res.json()).catch(() => [])
+      ]).then(([addData, dropData]) => {
+        const trendingAdds = (addData || []).map(({ player_id, count }) => ({ playerId: player_id, count }));
+        const trendingDrops = (dropData || []).map(({ player_id, count }) => ({ playerId: player_id, count }));
+        setTrendingPlayers({ add: trendingAdds, drop: trendingDrops });
+      }).catch(err => console.error('Error fetching global trending players:', err));
 
       // Fetch draft data - prefer league.draft_id (this season's draft) and
       // only fall back to the drafts list if that's missing, since a league
@@ -201,6 +191,16 @@ export default function FantasyLeagueSite() {
         .then(res => (res ? res.json() : []))
         .then(picks => setDraftPicks(picks || []))
         .catch(err => console.error('Error fetching draft data:', err));
+
+      // Fetch playoff bracket to determine the actual champion. Only
+      // meaningful once playoffs have started, but it's harmless to fetch
+      // any time - it'll just come back without a decided final yet.
+      if (seasonHasStarted) {
+        fetch(`${API_BASE}/league/${LEAGUE_ID}/winners_bracket`)
+          .then(res => res.json())
+          .then(bracket => setWinnersBracket(Array.isArray(bracket) ? bracket : []))
+          .catch(err => console.error('Error fetching winners bracket:', err));
+      }
 
       // Fetch players LAST and in background - this is the heavy one (5MB)
       // Only fetch if we actually need it (optimization)
@@ -247,6 +247,17 @@ export default function FantasyLeagueSite() {
   const isPlayerRostered = (playerId) => {
     return rosters.some(roster => roster.players && roster.players.includes(playerId));
   };
+
+  // The championship match in Sleeper's bracket format is the one row with
+  // p === 1 ("place 1"); its "w" field is the winning roster_id once the
+  // final has been played. (roster.settings.division_winner is a different
+  // thing entirely - regular-season division winner - and was never the
+  // right field to check here.)
+  const championRosterId = (() => {
+    const finalMatch = winnersBracket.find(m => m.p === 1);
+    return finalMatch && finalMatch.w != null ? finalMatch.w : null;
+  })();
+  const championName = championRosterId != null ? getTeamName(championRosterId) : null;
 
   if (loading) {
     return (
@@ -357,12 +368,12 @@ export default function FantasyLeagueSite() {
 
       <div className="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-8">
         {activeTab === 'home' && <HomePage darkMode={darkMode} leagueData={leagueData} rosters={rosters} currentWeek={currentWeek} setActiveTab={setActiveTab} />}
-        {activeTab === 'info' && <LeagueInfoPage darkMode={darkMode} leagueData={leagueData} rosters={rosters} users={users} />}
+        {activeTab === 'info' && <LeagueInfoPage darkMode={darkMode} leagueData={leagueData} rosters={rosters} users={users} championName={championName} />}
         {activeTab === 'current' && <CurrentPage darkMode={darkMode} currentWeek={currentWeek} currentMatchups={currentMatchups} previousMatchups={previousMatchups} rosters={rosters} leagueData={leagueData} getTeamName={getTeamName} getAvatar={getAvatar} />}
         {activeTab === 'waivers' && <WaiversPage darkMode={darkMode} transactions={transactions} trendingPlayers={trendingPlayers} players={players} rosters={rosters} getTeamName={getTeamName} getPlayerName={getPlayerName} getPlayerPosition={getPlayerPosition} getPlayerTeam={getPlayerTeam} isPlayerRostered={isPlayerRostered} />}
         {activeTab === 'draft' && <DraftPage darkMode={darkMode} draftPicks={draftPicks} rosters={rosters} users={users} getTeamName={getTeamName} getPlayerName={getPlayerName} players={players} />}
-        {activeTab === 'standings' && <StandingsPage darkMode={darkMode} rosters={rosters} getTeamName={getTeamName} currentWeek={currentWeek} leagueData={leagueData} />}
-        {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} allMatchups={allMatchups} leagueData={leagueData} getTeamName={getTeamName} getAvatar={getAvatar} />}
+        {activeTab === 'standings' && <StandingsPage darkMode={darkMode} rosters={rosters} getTeamName={getTeamName} currentWeek={currentWeek} leagueData={leagueData} allMatchups={allMatchups} />}
+        {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} allMatchups={allMatchups} leagueData={leagueData} championName={championName} getTeamName={getTeamName} getAvatar={getAvatar} />}
       </div>
     </div>
   );
@@ -483,7 +494,7 @@ function QuickLinkCard({ title, icon: Icon, tab, setActiveTab, darkMode, color }
 }
 
 // League Info Page Component
-function LeagueInfoPage({ darkMode, leagueData, rosters, users }) {
+function LeagueInfoPage({ darkMode, leagueData, rosters, users, championName }) {
   return (
     <div className="space-y-6 sm:space-y-8">
       <h1 className="text-2xl sm:text-3xl font-bold">League Information</h1>
@@ -537,17 +548,21 @@ function LeagueInfoPage({ darkMode, leagueData, rosters, users }) {
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6`}>
         <h2 className="text-xl sm:text-2xl font-bold mb-4">League Champions</h2>
         <div className="space-y-2">
-          {leagueData?.status === 'complete' ? (
+          {championName ? (
             <div className="flex items-center gap-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 rounded">
               <Trophy className="w-6 h-6 text-yellow-600" />
               <div>
                 <p className="font-bold">{leagueData?.season} Champion</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400">{championName}</p>
+              </div>
+            </div>
+          ) : leagueData?.status === 'complete' ? (
+            <div className="flex items-center gap-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 rounded">
+              <Trophy className="w-6 h-6 text-yellow-600" />
+              <div>
+                <p className="font-bold">{leagueData?.season} Season Complete</p>
                 <p className="text-sm text-gray-600 dark:text-gray-400">
-                  {rosters.find(r => r.settings.division_winner === 1)
-                    ? users.find(u => u.user_id === rosters.find(r => r.settings.division_winner === 1).owner_id)?.metadata?.team_name || 
-                      users.find(u => u.user_id === rosters.find(r => r.settings.division_winner === 1).owner_id)?.display_name || 
-                      'Champion TBD'
-                    : 'Check playoff bracket for winner'}
+                  Championship result isn't available from the API for this league yet.
                 </p>
               </div>
             </div>
@@ -559,6 +574,7 @@ function LeagueInfoPage({ darkMode, leagueData, rosters, users }) {
                 <p className="text-sm text-gray-600 dark:text-gray-400">
                   {leagueData?.status === 'in_season' ? 'Season in progress...' : 
                    leagueData?.status === 'post_season' ? 'Playoffs in progress...' :
+                   leagueData?.status === 'drafting' ? 'Draft in progress...' :
                    leagueData?.status === 'pre_draft' ? 'Pre-draft' : 'Season status: ' + leagueData?.status}
                 </p>
               </div>
@@ -869,43 +885,58 @@ function WaiversPage({ darkMode, transactions, trendingPlayers, players, rosters
     <div className="space-y-6 sm:space-y-8">
       <h1 className="text-2xl sm:text-3xl font-bold">Waivers & Free Agents</h1>
       
-      {/* Trending Players */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
-          <h2 className="text-xl font-bold mb-4 text-green-600">📈 Trending Adds</h2>
-          <div className="space-y-2">
-            {trendingPlayers.add.slice(0, 5).map(({ playerId, count }) => (
-              <div key={playerId} className={`flex items-center justify-between p-2 rounded ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
-                <div>
-                  <p className="font-semibold">{getPlayerName(playerId)}</p>
-                  <p className="text-sm text-gray-500">{getPlayerPosition(playerId)} - {getPlayerTeam(playerId)}</p>
+      {/* Trending Players - Sleeper-wide, not just this league */}
+      <div>
+        <p className={`text-xs mb-2 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+          Trending adds/drops below reflect activity across <strong>all of Sleeper</strong> in the last 24
+          hours (via Sleeper's trending API), not just this league — so you can catch waiver-wire buzz
+          early. ESPN and Yahoo don't offer a public trending feed like this, so this is Sleeper-platform
+          data specifically. "In league" tags show players already on a roster here.
+        </p>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+            <h2 className="text-xl font-bold mb-4 text-green-600">📈 Trending Adds (Sleeper-wide)</h2>
+            <div className="space-y-2">
+              {trendingPlayers.add.slice(0, 5).map(({ playerId, count }) => (
+                <div key={playerId} className={`flex items-center justify-between p-2 rounded ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
+                  <div>
+                    <p className="font-semibold">
+                      {getPlayerName(playerId)}
+                      {isPlayerRostered(playerId) && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">in league</span>}
+                    </p>
+                    <p className="text-sm text-gray-500">{getPlayerPosition(playerId)} - {getPlayerTeam(playerId)}</p>
+                  </div>
+                  <span className="text-sm font-medium text-green-600">{count.toLocaleString()} adds</span>
                 </div>
-                <span className="text-sm font-medium text-green-600">{count} adds</span>
-              </div>
-            ))}
-            {trendingPlayers.add.length === 0 && (
-              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>No trending adds this week</p>
-            )}
+              ))}
+              {trendingPlayers.add.length === 0 && (
+                <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>No trending adds right now</p>
+              )}
+            </div>
           </div>
-        </div>
 
-        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
-          <h2 className="text-xl font-bold mb-4 text-red-600">📉 Trending Drops</h2>
-          <div className="space-y-2">
-            {trendingPlayers.drop.slice(0, 5).map(({ playerId, count }) => (
-              <div key={playerId} className={`flex items-center justify-between p-2 rounded ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
-                <div>
-                  <p className="font-semibold">{getPlayerName(playerId)}</p>
-                  <p className="text-sm text-gray-500">{getPlayerPosition(playerId)} - {getPlayerTeam(playerId)}</p>
+          <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+            <h2 className="text-xl font-bold mb-4 text-red-600">📉 Trending Drops (Sleeper-wide)</h2>
+            <div className="space-y-2">
+              {trendingPlayers.drop.slice(0, 5).map(({ playerId, count }) => (
+                <div key={playerId} className={`flex items-center justify-between p-2 rounded ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
+                  <div>
+                    <p className="font-semibold">
+                      {getPlayerName(playerId)}
+                      {isPlayerRostered(playerId) && <span className="ml-2 text-xs px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300">in league</span>}
+                    </p>
+                    <p className="text-sm text-gray-500">{getPlayerPosition(playerId)} - {getPlayerTeam(playerId)}</p>
+                  </div>
+                  <span className="text-sm font-medium text-red-600">{count.toLocaleString()} drops</span>
                 </div>
-                <span className="text-sm font-medium text-red-600">{count} drops</span>
-              </div>
-            ))}
-            {trendingPlayers.drop.length === 0 && (
-              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>No trending drops this week</p>
-            )}
+              ))}
+              {trendingPlayers.drop.length === 0 && (
+                <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>No trending drops right now</p>
+              )}
+            </div>
           </div>
         </div>
+        <p className={`text-[11px] mt-2 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Trending data courtesy of Sleeper.</p>
       </div>
 
       {/* Top Available Players */}
@@ -1226,7 +1257,7 @@ function KeeperCalculator({ darkMode, calculateKeeperCost }) {
 }
 
 // Standings Page with projections
-function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData }) {
+function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData, allMatchups = {} }) {
   const regularSeasonWeeks = leagueData?.settings?.playoff_week_start ? leagueData.settings.playoff_week_start - 1 : 14;
   const weeksRemaining = Math.max(0, regularSeasonWeeks - currentWeek);
   
@@ -1454,7 +1485,7 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
 }
 
 // History Page with records and season archives
-function HistoryPage({ darkMode, rosters, users, allMatchups, leagueData, getTeamName, getAvatar }) {
+function HistoryPage({ darkMode, rosters, users, allMatchups, leagueData, championName, getTeamName, getAvatar }) {
   const [expandedSeason, setExpandedSeason] = useState(null);
 
   // Calculate highest score from all matchups
@@ -1522,13 +1553,23 @@ function HistoryPage({ darkMode, rosters, users, allMatchups, leagueData, getTea
         <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-yellow-500`}>
           <Crown className="w-12 h-12 text-yellow-500 mx-auto mb-2" />
           <h3 className="font-bold text-lg mb-2">League Champion 👑</h3>
-          <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{leagueData?.season || '2024'} Season</p>
-          <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>
-            {leagueData?.status === 'complete' ? 'Season Complete - Check brackets' :
-             leagueData?.status === 'post_season' ? 'Playoffs in progress!' :
-             leagueData?.status === 'in_season' ? 'Regular season in progress...' :
-             'Season not started'}
-          </p>
+          {championName ? (
+            <>
+              <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{championName}</p>
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>{leagueData?.season} Season</p>
+            </>
+          ) : (
+            <>
+              <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{leagueData?.season || 'This'} Season</p>
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>
+                {leagueData?.status === 'complete' ? "Season complete - championship result not available from the API" :
+                 leagueData?.status === 'post_season' ? 'Playoffs in progress!' :
+                 leagueData?.status === 'in_season' ? 'Regular season in progress...' :
+                 leagueData?.status === 'drafting' ? 'Draft in progress...' :
+                 'Season not started'}
+              </p>
+            </>
+          )}
         </div>
 
         <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-blue-500`}>
