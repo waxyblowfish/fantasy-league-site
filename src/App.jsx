@@ -3,12 +3,28 @@ import { Trophy, TrendingUp, History, Users, Calendar, BarChart3, Info, Moon, Su
 import { Analytics } from '@vercel/analytics/react';
 import { SpeedInsights } from '@vercel/speed-insights/react';
 
+// ⚠️ IMPORTANT: Sleeper creates a BRAND NEW league_id every season for the
+// same league (it links seasons together internally via "previous_league_id").
+// That means this ID will need to be updated once a year, right after your
+// commissioner rolls the league over to the new season on Sleeper.
+// If you're not sure this is still correct, the app will try to auto-detect
+// a newer season below and show a banner with the new ID to paste in here.
 const LEAGUE_ID = '1257085009114697728';
 const API_BASE = 'https://api.sleeper.app/v1';
-const CURRENT_YEAR = '2024';
 
 // Notice Board - Edit this text to update the default notice on the home page
-const INITIAL_NOTICE = "🏈 Welcome to the 2024 season! Good luck to all teams!";
+const INITIAL_NOTICE = "🏈 Welcome to the new season! Good luck to all teams!";
+
+// Roughly determines the "label year" of the current/upcoming NFL season.
+// NFL seasons are labeled by the year they start (e.g. games played in
+// Jan/Feb 2027 still belong to the "2026" season), so Jan/Feb counts as
+// still being the previous label year.
+const getCurrentNFLSeasonLabel = () => {
+  const now = new Date();
+  const month = now.getMonth(); // 0 = Jan
+  const year = now.getFullYear();
+  return (month <= 1 ? year - 1 : year).toString();
+};
 
 export default function FantasyLeagueSite() {
   const [activeTab, setActiveTab] = useState('home');
@@ -23,8 +39,9 @@ export default function FantasyLeagueSite() {
   const [draftPicks, setDraftPicks] = useState([]);
   const [trendingPlayers, setTrendingPlayers] = useState({ add: [], drop: [] });
   const [loading, setLoading] = useState(true);
-  const [currentWeek, setCurrentWeek] = useState(1);
+  const [currentWeek, setCurrentWeek] = useState(0);
   const [darkMode, setDarkMode] = useState(false);
+  const [newSeasonLeagueId, setNewSeasonLeagueId] = useState(null);
 
   // Initialize dark mode based on system preference
   useEffect(() => {
@@ -54,17 +71,45 @@ export default function FantasyLeagueSite() {
       setLeagueData(league);
       setRosters(rostersData);
       setUsers(usersData);
-      
-      const week = league.settings.leg || 1;
+
+      // Check whether this hardcoded LEAGUE_ID is stale (last season is over
+      // and Sleeper has already rolled the league forward to a new ID).
+      // We only bother checking when it looks like it might be out of date,
+      // to avoid extra API calls during a normal live season.
+      const targetSeasonLabel = getCurrentNFLSeasonLabel();
+      if (league.status === 'complete' && league.season !== targetSeasonLabel) {
+        try {
+          const ownerId = usersData?.[0]?.user_id;
+          if (ownerId) {
+            const futureLeaguesRes = await fetch(`${API_BASE}/user/${ownerId}/leagues/nfl/${targetSeasonLabel}`);
+            const futureLeagues = await futureLeaguesRes.json();
+            const match = Array.isArray(futureLeagues)
+              ? futureLeagues.find(l => l.previous_league_id === LEAGUE_ID) ||
+                futureLeagues.find(l => l.name === league.name)
+              : null;
+            if (match) setNewSeasonLeagueId(match.league_id);
+          }
+        } catch (err) {
+          console.error('Error checking for newer season league:', err);
+        }
+      }
+
+      // Only treat the league as having an active "week" once the draft is
+      // done and games are actually being played. Before that (pre_draft /
+      // drafting), league.settings.leg is meaningless (often 0 or stale from
+      // last look) and would otherwise make the UI show a fake "Week 1".
+      const seasonHasStarted = league.status === 'in_season' || league.status === 'post_season' || league.status === 'complete';
+      const week = seasonHasStarted ? (league.settings.leg || 1) : 0;
       setCurrentWeek(week);
-      
-      // Fetch current and previous week matchups
+
+      // Fetch current and previous week matchups (only if season has started)
       const matchupPromises = [];
-      if (week <= 18) {
+      if (week >= 1 && week <= 18) {
         matchupPromises.push(
           fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${week}`)
             .then(res => res.json())
             .then(data => setCurrentMatchups(data || []))
+            .catch(() => setCurrentMatchups([]))
         );
       }
       if (week > 1) {
@@ -72,6 +117,7 @@ export default function FantasyLeagueSite() {
           fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${week - 1}`)
             .then(res => res.json())
             .then(data => setPreviousMatchups(data || []))
+            .catch(() => setPreviousMatchups([]))
         );
       }
       await Promise.all(matchupPromises);
@@ -82,7 +128,7 @@ export default function FantasyLeagueSite() {
       // Fetch heavy data in background (non-blocking)
       // All matchups for history - limit to current season only
       const matchupsPromises = [];
-      for (let w = 1; w <= Math.min(week, 18); w++) {
+      for (let w = 1; w <= Math.min(week, 18) && week >= 1; w++) {
         matchupsPromises.push(
           fetch(`${API_BASE}/league/${LEAGUE_ID}/matchups/${w}`)
             .then(res => res.json())
@@ -101,7 +147,7 @@ export default function FantasyLeagueSite() {
 
       // Fetch recent transactions (last 2 weeks only - reduced from 3)
       const transPromises = [];
-      for (let w = Math.max(1, week - 1); w <= week; w++) {
+      for (let w = Math.max(1, week - 1); w <= week && week >= 1; w++) {
         transPromises.push(
           fetch(`${API_BASE}/league/${LEAGUE_ID}/transactions/${w}`)
             .then(res => res.json())
@@ -140,17 +186,19 @@ export default function FantasyLeagueSite() {
         setTrendingPlayers({ add: trendingAdds, drop: trendingDrops });
       });
 
-      // Fetch draft data
-      fetch(`${API_BASE}/league/${LEAGUE_ID}/drafts`)
-        .then(res => res.json())
-        .then(drafts => {
-          if (drafts && drafts.length > 0) {
-            const draftId = drafts[0].draft_id;
-            return fetch(`${API_BASE}/draft/${draftId}/picks`);
-          }
-          return null;
-        })
-        .then(res => res ? res.json() : [])
+      // Fetch draft data - prefer league.draft_id (this season's draft) and
+      // only fall back to the drafts list if that's missing, since a league
+      // can have more than one draft object and [0] isn't guaranteed to be
+      // the current season's draft.
+      const draftIdPromise = league.draft_id
+        ? Promise.resolve(league.draft_id)
+        : fetch(`${API_BASE}/league/${LEAGUE_ID}/drafts`)
+            .then(res => res.json())
+            .then(drafts => (drafts && drafts.length > 0 ? drafts[0].draft_id : null));
+
+      draftIdPromise
+        .then(draftId => (draftId ? fetch(`${API_BASE}/draft/${draftId}/picks`) : null))
+        .then(res => (res ? res.json() : []))
         .then(picks => setDraftPicks(picks || []))
         .catch(err => console.error('Error fetching draft data:', err));
 
@@ -288,14 +336,33 @@ export default function FantasyLeagueSite() {
       </nav>
 
       {/* Content */}
+      {newSeasonLeagueId && (
+        <div className="max-w-7xl mx-auto px-2 sm:px-4 pt-4">
+          <div className="bg-yellow-100 dark:bg-yellow-900/30 border-2 border-yellow-500 rounded-lg p-4 flex items-start gap-3">
+            <AlertCircle className="w-6 h-6 text-yellow-600 flex-shrink-0 mt-0.5" />
+            <div className="text-sm sm:text-base">
+              <p className="font-bold">A newer season was found for this league!</p>
+              <p className={darkMode ? 'text-gray-300' : 'text-gray-700'}>
+                This site is still pointed at last season's League ID. Update the{' '}
+                <code className="px-1 rounded bg-black/10 dark:bg-white/10">LEAGUE_ID</code> constant near the
+                top of <code className="px-1 rounded bg-black/10 dark:bg-white/10">src/App.jsx</code> to:
+              </p>
+              <p className="font-mono text-xs sm:text-sm mt-1 p-2 rounded bg-black/10 dark:bg-white/10 break-all">
+                {newSeasonLeagueId}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-8">
         {activeTab === 'home' && <HomePage darkMode={darkMode} leagueData={leagueData} rosters={rosters} currentWeek={currentWeek} setActiveTab={setActiveTab} />}
         {activeTab === 'info' && <LeagueInfoPage darkMode={darkMode} leagueData={leagueData} rosters={rosters} users={users} />}
-        {activeTab === 'current' && <CurrentPage darkMode={darkMode} currentWeek={currentWeek} currentMatchups={currentMatchups} previousMatchups={previousMatchups} rosters={rosters} getTeamName={getTeamName} getAvatar={getAvatar} />}
+        {activeTab === 'current' && <CurrentPage darkMode={darkMode} currentWeek={currentWeek} currentMatchups={currentMatchups} previousMatchups={previousMatchups} rosters={rosters} leagueData={leagueData} getTeamName={getTeamName} getAvatar={getAvatar} />}
         {activeTab === 'waivers' && <WaiversPage darkMode={darkMode} transactions={transactions} trendingPlayers={trendingPlayers} players={players} rosters={rosters} getTeamName={getTeamName} getPlayerName={getPlayerName} getPlayerPosition={getPlayerPosition} getPlayerTeam={getPlayerTeam} isPlayerRostered={isPlayerRostered} />}
         {activeTab === 'draft' && <DraftPage darkMode={darkMode} draftPicks={draftPicks} rosters={rosters} users={users} getTeamName={getTeamName} getPlayerName={getPlayerName} players={players} />}
         {activeTab === 'standings' && <StandingsPage darkMode={darkMode} rosters={rosters} getTeamName={getTeamName} currentWeek={currentWeek} leagueData={leagueData} />}
-        {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} allMatchups={allMatchups} getTeamName={getTeamName} getAvatar={getAvatar} />}
+        {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} allMatchups={allMatchups} leagueData={leagueData} getTeamName={getTeamName} getAvatar={getAvatar} />}
       </div>
     </div>
   );
@@ -470,13 +537,33 @@ function LeagueInfoPage({ darkMode, leagueData, rosters, users }) {
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6`}>
         <h2 className="text-xl sm:text-2xl font-bold mb-4">League Champions</h2>
         <div className="space-y-2">
-          <div className="flex items-center gap-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 rounded">
-            <Trophy className="w-6 h-6 text-yellow-600" />
-            <div>
-              <p className="font-bold">2024 Champion</p>
-              <p className="text-sm text-gray-600 dark:text-gray-400">Season in progress...</p>
+          {leagueData?.status === 'complete' ? (
+            <div className="flex items-center gap-4 p-3 bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 rounded">
+              <Trophy className="w-6 h-6 text-yellow-600" />
+              <div>
+                <p className="font-bold">{leagueData?.season} Champion</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  {rosters.find(r => r.settings.division_winner === 1)
+                    ? users.find(u => u.user_id === rosters.find(r => r.settings.division_winner === 1).owner_id)?.metadata?.team_name || 
+                      users.find(u => u.user_id === rosters.find(r => r.settings.division_winner === 1).owner_id)?.display_name || 
+                      'Champion TBD'
+                    : 'Check playoff bracket for winner'}
+                </p>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="flex items-center gap-4 p-3 bg-blue-50 dark:bg-blue-900/20 border-l-4 border-blue-500 rounded">
+              <Trophy className="w-6 h-6 text-blue-600" />
+              <div>
+                <p className="font-bold">{leagueData?.season} Season</p>
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  {leagueData?.status === 'in_season' ? 'Season in progress...' : 
+                   leagueData?.status === 'post_season' ? 'Playoffs in progress...' :
+                   leagueData?.status === 'pre_draft' ? 'Pre-draft' : 'Season status: ' + leagueData?.status}
+                </p>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -484,7 +571,29 @@ function LeagueInfoPage({ darkMode, leagueData, rosters, users }) {
 }
 
 // Current Page Component
-function CurrentPage({ darkMode, currentWeek, currentMatchups, previousMatchups, rosters, getTeamName, getAvatar }) {
+function CurrentPage({ darkMode, currentWeek, currentMatchups, previousMatchups, rosters, leagueData, getTeamName, getAvatar }) {
+  const playoffTeams = leagueData?.settings?.playoff_teams || 6;
+
+  // Season hasn't started yet (pre-draft or drafting) - show a friendly
+  // placeholder instead of a misleading "Week 0" / empty matchup boxes.
+  if (currentWeek < 1) {
+    return (
+      <div className="space-y-6 sm:space-y-8">
+        <h1 className="text-2xl sm:text-3xl font-bold">Current Season</h1>
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center`}>
+          <Calendar className="w-12 h-12 text-blue-500 mx-auto mb-3" />
+          <h2 className="text-xl font-bold mb-2">
+            {leagueData?.status === 'drafting' ? 'Draft is underway!' : 'Season hasn\'t started yet'}
+          </h2>
+          <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+            Matchups and recaps will show up here once Week 1 games are underway.
+          </p>
+        </div>
+        <StandingsTable rosters={rosters} getTeamName={getTeamName} darkMode={darkMode} showPlayoffLine={true} playoffTeams={playoffTeams} />
+      </div>
+    );
+  }
+
   const groupedCurrent = currentMatchups.reduce((acc, m) => {
     if (!acc[m.matchup_id]) acc[m.matchup_id] = [];
     acc[m.matchup_id].push(m);
@@ -509,7 +618,7 @@ function CurrentPage({ darkMode, currentWeek, currentMatchups, previousMatchups,
         <MatchupsSection title={`Week ${currentWeek - 1} Results`} matchups={groupedPrevious} getTeamName={getTeamName} getAvatar={getAvatar} darkMode={darkMode} isCurrent={false} />
       )}
 
-      <StandingsTable rosters={rosters} getTeamName={getTeamName} darkMode={darkMode} showPlayoffLine={true} />
+      <StandingsTable rosters={rosters} getTeamName={getTeamName} darkMode={darkMode} showPlayoffLine={true} playoffTeams={playoffTeams} />
     </div>
   );
 }
@@ -574,7 +683,7 @@ function TeamDisplay({ name, avatar, score, favored, won, darkMode, reverse }) {
   );
 }
 
-function StandingsTable({ rosters, getTeamName, darkMode, showPlayoffLine }) {
+function StandingsTable({ rosters, getTeamName, darkMode, showPlayoffLine, playoffTeams = 6 }) {
   const sortedRosters = [...rosters].sort((a, b) => {
     if ((b.settings.wins || 0) !== (a.settings.wins || 0)) {
       return (b.settings.wins || 0) - (a.settings.wins || 0);
@@ -600,7 +709,7 @@ function StandingsTable({ rosters, getTeamName, darkMode, showPlayoffLine }) {
             <tr 
               key={roster.roster_id} 
               className={`border-b ${darkMode ? 'border-gray-700 hover:bg-gray-700' : 'border-gray-200 hover:bg-gray-50'} ${
-                showPlayoffLine && idx === 5 ? 'border-b-4 border-red-500' : ''
+                showPlayoffLine && idx === playoffTeams - 1 ? 'border-b-4 border-red-500' : ''
               }`}
             >
               <td className="p-2 font-bold text-sm sm:text-base">{idx + 1}</td>
@@ -1155,7 +1264,7 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
     <div className="space-y-6 sm:space-y-8">
       <h1 className="text-2xl sm:text-3xl font-bold">Standings & Projections</h1>
       
-      <StandingsTable rosters={rosters} getTeamName={getTeamName} darkMode={darkMode} showPlayoffLine={true} />
+      <StandingsTable rosters={rosters} getTeamName={getTeamName} darkMode={darkMode} showPlayoffLine={true} playoffTeams={playoffTeams} />
 
       {weeksRemaining > 0 && (
         <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
@@ -1198,30 +1307,146 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
 
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
         <h2 className="text-xl sm:text-2xl font-bold mb-4">League Analytics</h2>
+        
+        {/* Expected Wins vs Actual - The cool stat you requested! */}
+        <div className="mb-6">
+          <h3 className="font-bold text-lg mb-3">Expected Wins vs Actual Wins</h3>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
+            Expected wins calculated by comparing each team's score to all opponents each week
+          </p>
+          <div className="space-y-2">
+            {rosters
+              .map(roster => {
+                const actualWins = roster.settings.wins || 0;
+                const actualLosses = roster.settings.losses || 0;
+                const gamesPlayed = actualWins + actualLosses;
+                
+                // Calculate expected wins by checking how many matchups they would've won
+                // based on their points vs everyone else
+                let expectedWins = 0;
+                Object.values(allMatchups).forEach(weekMatchups => {
+                  const teamMatchup = weekMatchups?.find(m => m.roster_id === roster.roster_id);
+                  if (teamMatchup && teamMatchup.points) {
+                    // Count how many teams they would've beaten this week
+                    const teamsBeaten = weekMatchups.filter(m => 
+                      m.roster_id !== roster.roster_id && m.points < teamMatchup.points
+                    ).length;
+                    expectedWins += teamsBeaten / (weekMatchups.length - 1);
+                  }
+                });
+                
+                const difference = actualWins - expectedWins;
+                const isLucky = difference > 0.5;
+                const isUnlucky = difference < -0.5;
+                
+                return {
+                  rosterId: roster.roster_id,
+                  actualWins,
+                  expectedWins: expectedWins.toFixed(1),
+                  difference: difference.toFixed(1),
+                  isLucky,
+                  isUnlucky
+                };
+              })
+              .sort((a, b) => parseFloat(b.difference) - parseFloat(a.difference))
+              .map(team => (
+                <div key={team.rosterId} className={`flex items-center justify-between p-3 rounded ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
+                  <div className="flex-1">
+                    <p className="font-semibold">{getTeamName(team.rosterId)}</p>
+                  </div>
+                  <div className="flex items-center gap-4 text-sm">
+                    <div className="text-right">
+                      <p className="text-xs text-gray-500">Actual</p>
+                      <p className="font-bold">{team.actualWins}W</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-gray-500">Expected</p>
+                      <p className="font-bold">{team.expectedWins}W</p>
+                    </div>
+                    <div className="text-right min-w-[80px]">
+                      <p className={`font-bold ${team.isLucky ? 'text-green-600 dark:text-green-400' : team.isUnlucky ? 'text-red-600 dark:text-red-400' : 'text-gray-600'}`}>
+                        {parseFloat(team.difference) > 0 ? '+' : ''}{team.difference}
+                      </p>
+                      <p className="text-xs">
+                        {team.isLucky ? '🍀 Lucky' : team.isUnlucky ? '😢 Unlucky' : '😐 Fair'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+          </div>
+        </div>
+
+        {/* Other Analytics - You can swap these out for different stats */}
+        <h3 className="font-bold text-lg mb-3">Season Leaders</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {/* Option 1: Highest Scorer */}
           <div className={`p-4 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
             <h3 className="font-semibold mb-2">Highest Scorer</h3>
             <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">
-              {getTeamName(rosters.reduce((max, r) => r.settings.fpts > max.settings.fpts ? r : max, rosters[0]).roster_id)}
+              {getTeamName(rosters.reduce((max, r) => (r.settings.fpts || 0) > (max.settings.fpts || 0) ? r : max, rosters[0]).roster_id)}
             </p>
             <p className="text-sm text-gray-500">{Math.max(...rosters.map(r => r.settings.fpts || 0)).toFixed(2)} pts</p>
           </div>
 
+          {/* Option 2: Points Per Game */}
           <div className={`p-4 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
-            <h3 className="font-semibold mb-2">Most Wins</h3>
-            <p className="text-2xl font-bold text-green-600 dark:text-green-400">
-              {getTeamName(rosters.reduce((max, r) => (r.settings.wins || 0) > (max.settings.wins || 0) ? r : max, rosters[0]).roster_id)}
-            </p>
-            <p className="text-sm text-gray-500">{Math.max(...rosters.map(r => r.settings.wins || 0))} wins</p>
+            <h3 className="font-semibold mb-2">Highest PPG</h3>
+            {(() => {
+              const teamPPG = rosters.map(r => {
+                const games = (r.settings.wins || 0) + (r.settings.losses || 0);
+                const ppg = games > 0 ? (r.settings.fpts || 0) / games : 0;
+                return { rosterId: r.roster_id, ppg };
+              });
+              const best = teamPPG.reduce((max, r) => r.ppg > max.ppg ? r : max, teamPPG[0]);
+              return (
+                <>
+                  <p className="text-2xl font-bold text-purple-600 dark:text-purple-400">
+                    {getTeamName(best.rosterId)}
+                  </p>
+                  <p className="text-sm text-gray-500">{best.ppg.toFixed(2)} pts/game</p>
+                </>
+              );
+            })()}
           </div>
 
+          {/* Option 3: Most Unlucky (Highest PA) */}
           <div className={`p-4 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
-            <h3 className="font-semibold mb-2">Points Against</h3>
+            <h3 className="font-semibold mb-2">Most Unlucky (Highest PA)</h3>
             <p className="text-2xl font-bold text-red-600 dark:text-red-400">
               {getTeamName(rosters.reduce((max, r) => (r.settings.fpts_against || 0) > (max.settings.fpts_against || 0) ? r : max, rosters[0]).roster_id)}
             </p>
-            <p className="text-sm text-gray-500">{Math.max(...rosters.map(r => r.settings.fpts_against || 0)).toFixed(2)} pts</p>
+            <p className="text-sm text-gray-500">{Math.max(...rosters.map(r => r.settings.fpts_against || 0)).toFixed(2)} PA</p>
           </div>
+
+          {/* ALTERNATIVE OPTIONS YOU CAN USE INSTEAD:
+          
+          Option 4: Point Differential
+          <div className={`p-4 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
+            <h3 className="font-semibold mb-2">Best Point Differential</h3>
+            {(() => {
+              const teamDiff = rosters.map(r => ({
+                rosterId: r.roster_id,
+                diff: (r.settings.fpts || 0) - (r.settings.fpts_against || 0)
+              }));
+              const best = teamDiff.reduce((max, r) => r.diff > max.diff ? r : max, teamDiff[0]);
+              return (
+                <>
+                  <p className="text-2xl font-bold text-green-600 dark:text-green-400">
+                    {getTeamName(best.rosterId)}
+                  </p>
+                  <p className="text-sm text-gray-500">+{best.diff.toFixed(2)} differential</p>
+                </>
+              );
+            })()}
+          </div>
+          
+          Option 5: Close Game Record
+          Option 6: Blowout Wins/Losses
+          Option 7: Consistency (Lowest Standard Deviation)
+          Option 8: Highest Single Week Score
+          
+          Just uncomment and swap in above! */}
         </div>
       </div>
     </div>
@@ -1229,7 +1454,7 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
 }
 
 // History Page with records and season archives
-function HistoryPage({ darkMode, rosters, users, allMatchups, getTeamName, getAvatar }) {
+function HistoryPage({ darkMode, rosters, users, allMatchups, leagueData, getTeamName, getAvatar }) {
   const [expandedSeason, setExpandedSeason] = useState(null);
 
   // Calculate highest score from all matchups
@@ -1297,8 +1522,13 @@ function HistoryPage({ darkMode, rosters, users, allMatchups, getTeamName, getAv
         <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-yellow-500`}>
           <Crown className="w-12 h-12 text-yellow-500 mx-auto mb-2" />
           <h3 className="font-bold text-lg mb-2">League Champion 👑</h3>
-          <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">2024 Season</p>
-          <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>In Progress...</p>
+          <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{leagueData?.season || '2024'} Season</p>
+          <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>
+            {leagueData?.status === 'complete' ? 'Season Complete - Check brackets' :
+             leagueData?.status === 'post_season' ? 'Playoffs in progress!' :
+             leagueData?.status === 'in_season' ? 'Regular season in progress...' :
+             'Season not started'}
+          </p>
         </div>
 
         <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-blue-500`}>
@@ -1334,7 +1564,12 @@ function HistoryPage({ darkMode, rosters, users, allMatchups, getTeamName, getAv
       </div>
 
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
-        <h2 className="text-xl sm:text-2xl font-bold mb-4">2024 Season Week-by-Week</h2>
+        <h2 className="text-xl sm:text-2xl font-bold mb-4">{leagueData?.season || 'This Season'} Week-by-Week</h2>
+        {Object.keys(allMatchups).length === 0 && (
+          <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+            No games played yet this season - check back after Week 1!
+          </p>
+        )}
         <div className="space-y-2">
           {Object.keys(allMatchups)
             .sort((a, b) => b - a)
