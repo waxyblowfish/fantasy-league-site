@@ -372,7 +372,7 @@ export default function FantasyLeagueSite() {
         {activeTab === 'current' && <CurrentPage darkMode={darkMode} currentWeek={currentWeek} currentMatchups={currentMatchups} previousMatchups={previousMatchups} rosters={rosters} leagueData={leagueData} getTeamName={getTeamName} getAvatar={getAvatar} />}
         {activeTab === 'waivers' && <WaiversPage darkMode={darkMode} transactions={transactions} trendingPlayers={trendingPlayers} players={players} rosters={rosters} getTeamName={getTeamName} getPlayerName={getPlayerName} getPlayerPosition={getPlayerPosition} getPlayerTeam={getPlayerTeam} isPlayerRostered={isPlayerRostered} />}
         {activeTab === 'draft' && <DraftPage darkMode={darkMode} draftPicks={draftPicks} rosters={rosters} users={users} getTeamName={getTeamName} getPlayerName={getPlayerName} players={players} />}
-        {activeTab === 'standings' && <StandingsPage darkMode={darkMode} rosters={rosters} getTeamName={getTeamName} currentWeek={currentWeek} leagueData={leagueData} allMatchups={allMatchups} />}
+        {activeTab === 'standings' && <StandingsPage darkMode={darkMode} rosters={rosters} getTeamName={getTeamName} currentWeek={currentWeek} leagueData={leagueData} allMatchups={allMatchups} players={players} />}
         {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} allMatchups={allMatchups} leagueData={leagueData} championName={championName} getTeamName={getTeamName} getAvatar={getAvatar} />}
       </div>
     </div>
@@ -825,7 +825,7 @@ function AIWeeklyRecap({ darkMode, matchups, getTeamName, week }) {
   if (!generated) {
     return (
       <div className={`${darkMode ? 'bg-purple-900/20 border-purple-700' : 'bg-purple-50 border-purple-200'} border-2 rounded-lg p-4 sm:p-6 text-center`}>
-        <h3 className="font-bold text-lg mb-2">🤖 AI Weekly Recap</h3>
+        <h3 className="font-bold text-lg mb-2">Weekly Recap</h3>
         <p className={`${darkMode ? 'text-gray-300' : 'text-gray-600'} mb-4 text-sm sm:text-base`}>Get a recap of what happened last week and what to watch this week!</p>
         <button
           onClick={generateRecap}
@@ -1257,7 +1257,71 @@ function KeeperCalculator({ darkMode, calculateKeeperCost }) {
 }
 
 // Standings Page with projections
-function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData, allMatchups = {} }) {
+// --- Lineup-optimization helpers (used for the Most Efficient Manager stat) ---
+
+// Maps flex-style slot codes to the set of positions eligible to fill them.
+// Any slot code not listed here (QB, RB, WR, TE, K, DEF, DL, LB, DB, ...) is
+// treated as requiring an exact position match.
+const FLEX_ELIGIBILITY = {
+  FLEX: ['RB', 'WR', 'TE'],
+  SUPER_FLEX: ['QB', 'RB', 'WR', 'TE'],
+  WRRB_FLEX: ['WR', 'RB'],
+  REC_FLEX: ['WR', 'TE'],
+  IDP_FLEX: ['DL', 'LB', 'DB'],
+};
+const NON_STARTING_SLOTS = new Set(['BN', 'IR', 'TAXI']);
+
+function getStartingSlots(rosterPositions) {
+  return (rosterPositions || []).filter(slot => !NON_STARTING_SLOTS.has(slot));
+}
+
+function getSlotEligiblePositions(slotCode) {
+  return FLEX_ELIGIBILITY[slotCode] || [slotCode];
+}
+
+// Greedy-optimal lineup solver: fills the most restrictive slots (single
+// exact position) first, then flex-type slots (which are supersets of
+// exact positions) with whoever's left. This ordering is optimal here
+// because a flex slot's eligible set is always a superset of the exact
+// slots it competes with, so there's never a reason to "save" a player
+// for a flex slot at the expense of a required exact slot.
+function computeBestLineupPoints(playerIds, playerPoints, playerMeta, startingSlots) {
+  const pool = (playerIds || [])
+    .map(id => {
+      const meta = playerMeta[id];
+      const positions = (meta?.fantasy_positions && meta.fantasy_positions.length > 0)
+        ? meta.fantasy_positions
+        : (meta?.position ? [meta.position] : []);
+      const pts = playerPoints && playerPoints[id] != null ? Number(playerPoints[id]) : 0;
+      return { id, positions, pts };
+    })
+    .filter(p => p.positions.length > 0);
+
+  const slotsBySpecificity = [...startingSlots].sort(
+    (a, b) => getSlotEligiblePositions(a).length - getSlotEligiblePositions(b).length
+  );
+
+  const available = [...pool];
+  let total = 0;
+  slotsBySpecificity.forEach(slot => {
+    const eligible = getSlotEligiblePositions(slot);
+    let bestIdx = -1;
+    let bestPts = -Infinity;
+    available.forEach((p, idx) => {
+      if (p.positions.some(pos => eligible.includes(pos)) && p.pts > bestPts) {
+        bestPts = p.pts;
+        bestIdx = idx;
+      }
+    });
+    if (bestIdx !== -1) {
+      total += available[bestIdx].pts;
+      available.splice(bestIdx, 1);
+    }
+  });
+  return total;
+}
+
+function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData, allMatchups = {}, players = {} }) {
   const regularSeasonWeeks = leagueData?.settings?.playoff_week_start ? leagueData.settings.playoff_week_start - 1 : 14;
   const weeksRemaining = Math.max(0, regularSeasonWeeks - currentWeek);
   
@@ -1290,6 +1354,17 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
   });
 
   const playoffTeams = leagueData?.settings?.playoff_teams || 6;
+
+  // Only use weeks that have actually finished. The "current" week can still
+  // be live (some teams played Thursday, others haven't played yet), and
+  // including it here would badly skew both Expected Wins and the lineup
+  // efficiency stat below - so both use this same completed-weeks slice.
+  const completedWeekMatchups = Object.entries(allMatchups)
+    .filter(([wk]) => parseInt(wk, 10) < currentWeek)
+    .map(([, matchups]) => matchups);
+
+  const startingSlots = getStartingSlots(leagueData?.roster_positions);
+  const hasPlayerData = players && Object.keys(players).length > 0;
 
   return (
     <div className="space-y-6 sm:space-y-8">
@@ -1339,30 +1414,31 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
         <h2 className="text-xl sm:text-2xl font-bold mb-4">League Analytics</h2>
         
-        {/* Expected Wins vs Actual - The cool stat you requested! */}
+        {/* Expected Wins vs Actual - fixed version */}
         <div className="mb-6">
           <h3 className="font-bold text-lg mb-3">Expected Wins vs Actual Wins</h3>
           <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">
-            Expected wins calculated by comparing each team's score to all opponents each week
+            For each completed week, we compare a team's score against every other team that week
+            (not just their actual opponent) to see how many "all-play" wins their scoring
+            deserved, then sum that across the season. Only finished weeks count — the current,
+            possibly still-live week is excluded so partial scores can't skew this.
           </p>
           <div className="space-y-2">
             {rosters
               .map(roster => {
                 const actualWins = roster.settings.wins || 0;
-                const actualLosses = roster.settings.losses || 0;
-                const gamesPlayed = actualWins + actualLosses;
-                
-                // Calculate expected wins by checking how many matchups they would've won
-                // based on their points vs everyone else
+
                 let expectedWins = 0;
-                Object.values(allMatchups).forEach(weekMatchups => {
+                completedWeekMatchups.forEach(weekMatchups => {
                   const teamMatchup = weekMatchups?.find(m => m.roster_id === roster.roster_id);
-                  if (teamMatchup && teamMatchup.points) {
-                    // Count how many teams they would've beaten this week
-                    const teamsBeaten = weekMatchups.filter(m => 
+                  if (teamMatchup && teamMatchup.points != null && weekMatchups.length > 1) {
+                    const beaten = weekMatchups.filter(m =>
                       m.roster_id !== roster.roster_id && m.points < teamMatchup.points
                     ).length;
-                    expectedWins += teamsBeaten / (weekMatchups.length - 1);
+                    const tied = weekMatchups.filter(m =>
+                      m.roster_id !== roster.roster_id && m.points === teamMatchup.points
+                    ).length;
+                    expectedWins += (beaten + tied * 0.5) / (weekMatchups.length - 1);
                   }
                 });
                 
@@ -1420,22 +1496,39 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
             <p className="text-sm text-gray-500">{Math.max(...rosters.map(r => r.settings.fpts || 0)).toFixed(2)} pts</p>
           </div>
 
-          {/* Option 2: Points Per Game */}
+          {/* Option 2: Most Efficient Manager (lineup optimization) */}
           <div className={`p-4 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-50'}`}>
-            <h3 className="font-semibold mb-2">Highest PPG</h3>
-            {(() => {
-              const teamPPG = rosters.map(r => {
-                const games = (r.settings.wins || 0) + (r.settings.losses || 0);
-                const ppg = games > 0 ? (r.settings.fpts || 0) / games : 0;
-                return { rosterId: r.roster_id, ppg };
-              });
-              const best = teamPPG.reduce((max, r) => r.ppg > max.ppg ? r : max, teamPPG[0]);
+            <h3 className="font-semibold mb-2">Most Efficient Manager</h3>
+            {!hasPlayerData ? (
+              <p className="text-sm text-gray-500">Loading player data...</p>
+            ) : completedWeekMatchups.length === 0 ? (
+              <p className="text-sm text-gray-500">Not enough completed weeks yet</p>
+            ) : (() => {
+              const efficiencyByTeam = rosters.map(r => {
+                let actualSum = 0;
+                let bestSum = 0;
+                completedWeekMatchups.forEach(weekMatchups => {
+                  const m = weekMatchups?.find(wm => wm.roster_id === r.roster_id);
+                  if (!m || m.points == null) return;
+                  actualSum += m.points;
+                  bestSum += computeBestLineupPoints(m.players, m.players_points, players, startingSlots);
+                });
+                const efficiency = bestSum > 0 ? (actualSum / bestSum) * 100 : 0;
+                return { rosterId: r.roster_id, efficiency, benchPtsLeft: bestSum - actualSum };
+              }).filter(t => t.efficiency > 0);
+
+              if (efficiencyByTeam.length === 0) {
+                return <p className="text-sm text-gray-500">Not enough data yet</p>;
+              }
+              const best = efficiencyByTeam.reduce((max, t) => t.efficiency > max.efficiency ? t : max, efficiencyByTeam[0]);
               return (
                 <>
                   <p className="text-2xl font-bold text-purple-600 dark:text-purple-400">
                     {getTeamName(best.rosterId)}
                   </p>
-                  <p className="text-sm text-gray-500">{best.ppg.toFixed(2)} pts/game</p>
+                  <p className="text-sm text-gray-500">
+                    {best.efficiency.toFixed(1)}% of best possible lineup started
+                  </p>
                 </>
               );
             })()}

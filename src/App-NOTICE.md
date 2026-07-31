@@ -14,7 +14,7 @@ Your notice will be saved in the browser and persist across visits!
 If you want to change the default notice that appears for new visitors:
 
 1. Open `src/App.jsx`
-2. Find line 11: `const INITIAL_NOTICE = "🏈 Welcome to the 2024 season! Good luck to all teams!";`
+2. Find line 11: `const INITIAL_NOTICE = "🏈 Welcome to the 2026-2027 season! If you have any questions or see any errors let Noah know! /nHave fun and good luck to everyone!";`
 3. Change the text between the quotes
 4. Save and deploy
 
