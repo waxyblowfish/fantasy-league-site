@@ -9,7 +9,7 @@ import { SpeedInsights } from '@vercel/speed-insights/react';
 // commissioner rolls the league over to the new season on Sleeper.
 // If you're not sure this is still correct, the app will try to auto-detect
 // a newer season below and show a banner with the new ID to paste in here.
-const LEAGUE_ID = '1257085009114697728';
+const LEAGUE_ID = '1389710454732914688';
 const API_BASE = 'https://api.sleeper.app/v1';
 
 // Notice Board - Edit this text to update the default notice on the home page
