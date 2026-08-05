@@ -13,8 +13,8 @@ const LEAGUE_ID = '1389710454732914688';
 const API_BASE = 'https://api.sleeper.app/v1';
 
 // Notice Board - Edit this text to update the default notice on the home page
-const INITIAL_NOTICE = "🏈 Welcome to the 2026-2027 season! If you have any questions or see any errors let Noah know! /nHave fun and good luck to everyone!";
-
+const INITIAL_NOTICE = `🏈 Welcome to the 2026-2027 season! If you have any questions or see any errors let Noah know!
+Have fun and good luck to everyone!`;   
 // Roughly determines the "label year" of the current/upcoming NFL season.
 // NFL seasons are labeled by the year they start (e.g. games played in
 // Jan/Feb 2027 still belong to the "2026" season), so Jan/Feb counts as
