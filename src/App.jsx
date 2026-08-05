@@ -13,8 +13,7 @@ const LEAGUE_ID = '1389710454732914688';
 const API_BASE = 'https://api.sleeper.app/v1';
 
 // Notice Board - Edit this text to update the default notice on the home page
-const INITIAL_NOTICE = `🏈 Welcome to the 2026-2027 season! If you have any questions or see any errors let Noah know!
-Have fun and good luck to everyone!`;   
+const INITIAL_NOTICE = "🏈 Welcome to the 2026-2027 season! If you have any questions or see any errors let Noah know! /nHave fun and good luck to everyone!";
 
 // Roughly determines the "label year" of the current/upcoming NFL season.
 // NFL seasons are labeled by the year they start (e.g. games played in
@@ -26,6 +25,66 @@ const getCurrentNFLSeasonLabel = () => {
   const year = now.getFullYear();
   return (month <= 1 ? year - 1 : year).toString();
 };
+
+// Walks backward through past seasons using Sleeper's previous_league_id
+// chain, pulling everything History needs for all-time records: rosters,
+// users, the playoff bracket (for that season's champion), and every
+// week's matchups (for highest score / win streak tracking).
+// Capped at 15 seasons back as a safety net against a bad/looping chain.
+async function fetchHistoricalSeasons(startPreviousLeagueId) {
+  const seasons = [];
+  let nextId = startPreviousLeagueId;
+  let safety = 0;
+
+  while (nextId && safety < 15) {
+    safety++;
+    try {
+      const [league, rosters, users] = await Promise.all([
+        fetch(`${API_BASE}/league/${nextId}`).then(r => r.json()),
+        fetch(`${API_BASE}/league/${nextId}/rosters`).then(r => r.json()),
+        fetch(`${API_BASE}/league/${nextId}/users`).then(r => r.json())
+      ]);
+
+      if (!league || !league.league_id) break;
+
+      const winnersBracket = await fetch(`${API_BASE}/league/${nextId}/winners_bracket`)
+        .then(r => r.json()).catch(() => []);
+
+      // Pull every week of that season. A completed season is normally
+      // <= 17-18 weeks; fetch them in parallel and just keep whichever
+      // weeks actually have data.
+      const weekResults = await Promise.all(
+        Array.from({ length: 18 }, (_, i) => i + 1).map(w =>
+          fetch(`${API_BASE}/league/${nextId}/matchups/${w}`)
+            .then(r => r.json())
+            .then(data => ({ week: w, matchups: Array.isArray(data) ? data : [] }))
+            .catch(() => ({ week: w, matchups: [] }))
+        )
+      );
+      const matchupsByWeek = {};
+      weekResults.forEach(({ week, matchups }) => {
+        if (matchups.length > 0) matchupsByWeek[week] = matchups;
+      });
+
+      seasons.push({
+        leagueId: nextId,
+        season: league.season,
+        status: league.status,
+        rosters: rosters || [],
+        users: users || [],
+        winnersBracket: Array.isArray(winnersBracket) ? winnersBracket : [],
+        matchupsByWeek
+      });
+
+      nextId = league.previous_league_id || null;
+    } catch (err) {
+      console.error('Error walking previous_league_id chain at', nextId, err);
+      break;
+    }
+  }
+
+  return seasons;
+}
 
 export default function FantasyLeagueSite() {
   const [activeTab, setActiveTab] = useState('home');
@@ -44,6 +103,8 @@ export default function FantasyLeagueSite() {
   const [currentWeek, setCurrentWeek] = useState(0);
   const [darkMode, setDarkMode] = useState(false);
   const [newSeasonLeagueId, setNewSeasonLeagueId] = useState(null);
+  const [historicalSeasons, setHistoricalSeasons] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   // Initialize dark mode based on system preference
   useEffect(() => {
@@ -209,6 +270,18 @@ export default function FantasyLeagueSite() {
         .then(res => res.json())
         .then(playersData => setPlayers(playersData))
         .catch(err => console.error('Error fetching players:', err));
+
+      // Walk backward through past seasons (Sleeper links seasons via
+      // previous_league_id) so History can show all-time records. This can
+      // be a lot of requests for an old league, so it runs fully in the
+      // background and never blocks the rest of the site.
+      if (league.previous_league_id) {
+        setHistoryLoading(true);
+        fetchHistoricalSeasons(league.previous_league_id)
+          .then(seasons => setHistoricalSeasons(seasons))
+          .catch(err => console.error('Error fetching historical seasons:', err))
+          .finally(() => setHistoryLoading(false));
+      }
       
     } catch (error) {
       console.error('Error fetching league data:', error);
@@ -374,7 +447,7 @@ export default function FantasyLeagueSite() {
         {activeTab === 'waivers' && <WaiversPage darkMode={darkMode} transactions={transactions} trendingPlayers={trendingPlayers} players={players} rosters={rosters} getTeamName={getTeamName} getPlayerName={getPlayerName} getPlayerPosition={getPlayerPosition} getPlayerTeam={getPlayerTeam} isPlayerRostered={isPlayerRostered} />}
         {activeTab === 'draft' && <DraftPage darkMode={darkMode} draftPicks={draftPicks} rosters={rosters} users={users} getTeamName={getTeamName} getPlayerName={getPlayerName} players={players} />}
         {activeTab === 'standings' && <StandingsPage darkMode={darkMode} rosters={rosters} getTeamName={getTeamName} currentWeek={currentWeek} leagueData={leagueData} allMatchups={allMatchups} players={players} />}
-        {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} allMatchups={allMatchups} leagueData={leagueData} championName={championName} getTeamName={getTeamName} getAvatar={getAvatar} />}
+        {activeTab === 'history' && <HistoryPage darkMode={darkMode} rosters={rosters} users={users} allMatchups={allMatchups} leagueData={leagueData} championName={championName} winnersBracket={winnersBracket} historicalSeasons={historicalSeasons} historyLoading={historyLoading} getTeamName={getTeamName} getAvatar={getAvatar} />}
       </div>
     </div>
   );
@@ -826,7 +899,7 @@ function AIWeeklyRecap({ darkMode, matchups, getTeamName, week }) {
   if (!generated) {
     return (
       <div className={`${darkMode ? 'bg-purple-900/20 border-purple-700' : 'bg-purple-50 border-purple-200'} border-2 rounded-lg p-4 sm:p-6 text-center`}>
-        <h3 className="font-bold text-lg mb-2">Weekly Recap</h3>
+        <h3 className="font-bold text-lg mb-2">🤖 AI Weekly Recap</h3>
         <p className={`${darkMode ? 'text-gray-300' : 'text-gray-600'} mb-4 text-sm sm:text-base`}>Get a recap of what happened last week and what to watch this week!</p>
         <button
           onClick={generateRecap}
@@ -1031,7 +1104,7 @@ function DraftPage({ darkMode, draftPicks, rosters, users, getTeamName, getPlaye
   const calculateKeeperCost = (draftRound, yearsKept) => {
     if (!draftRound || draftRound === 0) {
       // Undrafted/FA player - starts at 15th round
-      const rounds = [15, 12, 9, 6, 4, 2, 1];
+      const rounds = [15, 12, 9, 6, 3, 1];
       return rounds[Math.min(yearsKept, rounds.length - 1)];
     }
     
@@ -1072,7 +1145,7 @@ function DraftPage({ darkMode, draftPicks, rosters, users, getTeamName, getPlaye
           <p><strong>• First year:</strong> Same round as drafted</p>
           <p><strong>• Rounds 6-15:</strong> Cost increases by 3 rounds per year (10th → 7th → 4th → 2nd → 1st)</p>
           <p><strong>• Rounds 1-5:</strong> Cost increases by 2 rounds per year (5th → 3rd → 1st)</p>
-          <p><strong>• Undrafted/FA:</strong> Start at 15th round, then 12th → 9th → 6th → 4th → 2nd → 1st</p>
+          <p><strong>• Undrafted/FA:</strong> Start at 15th round, then 12th → 9th → 6th → 3rd → 1st</p>
           <p><strong>• Maximum:</strong> Once at 1st round cost for one year, then must release</p>
           <p><strong>• Tie-breaker:</strong> If two players cost same pick, lower ADP costs +1 round</p>
         </div>
@@ -1224,7 +1297,11 @@ function KeeperCalculator({ darkMode, calculateKeeperCost }) {
         <div className="grid grid-cols-7 gap-2">
           {years.map(year => {
             const cost = calculateKeeperCost(isUndrafted ? 0 : draftRound, year);
-            const canKeep = !(draftRound > 0 && cost === 1 && year > 0);
+            // A player can be kept for exactly one year at 1st-round cost.
+            // So this year is unkeepable only if the *previous* year had
+            // already reached 1st round cost - not the first year it gets there.
+            const prevCost = year > 0 ? calculateKeeperCost(isUndrafted ? 0 : draftRound, year - 1) : null;
+            const canKeep = prevCost !== 1;
             
             return (
               <div key={year} className="text-center">
@@ -1233,7 +1310,7 @@ function KeeperCalculator({ darkMode, calculateKeeperCost }) {
                   <p className={`text-xl sm:text-2xl font-bold ${canKeep ? 'text-blue-600 dark:text-blue-400' : 'text-gray-400'}`}>
                     {canKeep ? (cost === 1 ? '1st' : `${cost}th`) : 'N/A'}
                   </p>
-                  {!canKeep && year > 0 && (
+                  {!canKeep && (
                     <p className="text-xs text-red-600 dark:text-red-400 mt-1">Can't keep</p>
                   )}
                 </div>
@@ -1579,103 +1656,205 @@ function StandingsPage({ darkMode, rosters, getTeamName, currentWeek, leagueData
 }
 
 // History Page with records and season archives
-function HistoryPage({ darkMode, rosters, users, allMatchups, leagueData, championName, getTeamName, getAvatar }) {
+function HistoryPage({ darkMode, rosters, users, allMatchups, leagueData, championName, winnersBracket, historicalSeasons, historyLoading, getTeamName, getAvatar }) {
   const [expandedSeason, setExpandedSeason] = useState(null);
 
-  // Calculate highest score from all matchups
-  const calculateHighestScore = () => {
-    let highest = { score: 0, team: null, week: 0 };
-    Object.entries(allMatchups).forEach(([week, matchups]) => {
-      matchups?.forEach(matchup => {
-        if (matchup.points > highest.score) {
-          highest = { score: matchup.points, team: matchup.roster_id, week: parseInt(week) };
-        }
-      });
-    });
-    return highest;
+  // Combine the current season (already loaded elsewhere in the app) with
+  // every past season pulled via the previous_league_id chain, so all the
+  // "all-time" stats below look across the whole history of the league,
+  // not just whatever's currently loaded.
+  const allSeasons = React.useMemo(() => {
+    const current = {
+      leagueId: leagueData?.league_id,
+      season: leagueData?.season,
+      status: leagueData?.status,
+      rosters: rosters || [],
+      users: users || [],
+      winnersBracket: winnersBracket || [],
+      matchupsByWeek: allMatchups || {}
+    };
+    return [current, ...historicalSeasons];
+  }, [leagueData, rosters, users, winnersBracket, allMatchups, historicalSeasons]);
+
+  const getTeamNameInSeason = (season, rosterId) => {
+    const roster = (season.rosters || []).find(r => r.roster_id === rosterId);
+    if (!roster) return `Team ${rosterId}`;
+    const user = (season.users || []).find(u => u.user_id === roster.owner_id);
+    return user?.metadata?.team_name || user?.display_name || `Team ${rosterId}`;
   };
 
-  // Calculate longest win streak
-  const calculateLongestStreak = () => {
-    const teamStreaks = {};
-    rosters.forEach(roster => teamStreaks[roster.roster_id] = { current: 0, longest: 0 });
+  const getChampionForSeason = (season) => {
+    const finalMatch = (season.winnersBracket || []).find(m => m.p === 1);
+    if (!finalMatch || finalMatch.w == null) return null;
+    const roster = (season.rosters || []).find(r => r.roster_id === finalMatch.w);
+    if (!roster) return null;
+    const user = (season.users || []).find(u => u.user_id === roster.owner_id);
+    return {
+      userId: roster.owner_id,
+      name: user?.metadata?.team_name || user?.display_name || `Team ${finalMatch.w}`,
+      season: season.season
+    };
+  };
 
-    const weeks = Object.keys(allMatchups).sort((a, b) => a - b);
-    weeks.forEach(week => {
-      const matchups = allMatchups[week] || [];
-      const grouped = matchups.reduce((acc, m) => {
-        if (!acc[m.matchup_id]) acc[m.matchup_id] = [];
-        acc[m.matchup_id].push(m);
-        return acc;
-      }, {});
+  const getCurrentDisplayName = (userId) => {
+    const currentUser = (users || []).find(u => u.user_id === userId);
+    if (currentUser) return currentUser.metadata?.team_name || currentUser.display_name;
+    for (const s of allSeasons) {
+      const u = (s.users || []).find(u => u.user_id === userId);
+      if (u) return u.metadata?.team_name || u.display_name;
+    }
+    return 'Unknown Manager';
+  };
 
-      Object.values(grouped).forEach(pair => {
-        if (pair.length === 2) {
-          const [team1, team2] = pair;
-          const winner = team1.points > team2.points ? team1.roster_id : team2.roster_id;
-          const loser = team1.points > team2.points ? team2.roster_id : team1.roster_id;
+  // --- Last year's champion + most championships all-time ---
+  const { lastYearChampion, mostChampionships } = React.useMemo(() => {
+    const championsBySeasonNum = allSeasons
+      .map(s => ({ season: s, champ: getChampionForSeason(s) }))
+      .filter(x => x.champ)
+      .sort((a, b) => parseInt(b.season.season, 10) - parseInt(a.season.season, 10));
 
-          if (teamStreaks[winner]) {
-            teamStreaks[winner].current++;
-            teamStreaks[winner].longest = Math.max(teamStreaks[winner].longest, teamStreaks[winner].current);
+    const lastYear = championsBySeasonNum[0] || null;
+
+    const counts = {};
+    championsBySeasonNum.forEach(({ champ }) => {
+      counts[champ.userId] = (counts[champ.userId] || 0) + 1;
+    });
+    let topCount = 0;
+    Object.values(counts).forEach(c => { if (c > topCount) topCount = c; });
+    const topUserIds = Object.entries(counts).filter(([, c]) => c === topCount).map(([uid]) => uid);
+
+    return {
+      lastYearChampion: lastYear ? { name: lastYear.champ.name, season: lastYear.season.season } : null,
+      mostChampionships: topCount > 0
+        ? { names: topUserIds.map(getCurrentDisplayName), count: topCount }
+        : null
+    };
+  }, [allSeasons]);
+
+  // --- Highest score across every game, every season ---
+  const highestScoreEver = React.useMemo(() => {
+    let best = null;
+    allSeasons.forEach(season => {
+      Object.entries(season.matchupsByWeek || {}).forEach(([week, matchups]) => {
+        (matchups || []).forEach(m => {
+          if (typeof m.points === 'number' && (!best || m.points > best.points)) {
+            best = { points: m.points, week: parseInt(week, 10), season: season.season, team: getTeamNameInSeason(season, m.roster_id) };
           }
-          if (teamStreaks[loser]) {
-            teamStreaks[loser].current = 0;
+        });
+      });
+    });
+    return best;
+  }, [allSeasons]);
+
+  // --- Longest win streak across the whole history, tracked by manager (userId) so it can carry across season boundaries ---
+  const longestStreakEver = React.useMemo(() => {
+    const chronological = [...allSeasons].sort((a, b) => parseInt(a.season, 10) - parseInt(b.season, 10));
+    const streaks = {}; // userId -> { current, longest, atSeason, atWeek }
+
+    chronological.forEach(season => {
+      const weeks = Object.keys(season.matchupsByWeek || {}).sort((a, b) => parseInt(a, 10) - parseInt(b, 10));
+      weeks.forEach(week => {
+        const matchups = season.matchupsByWeek[week] || [];
+        const grouped = matchups.reduce((acc, m) => {
+          if (!acc[m.matchup_id]) acc[m.matchup_id] = [];
+          acc[m.matchup_id].push(m);
+          return acc;
+        }, {});
+
+        Object.values(grouped).forEach(pair => {
+          if (pair.length !== 2) return;
+          const [t1, t2] = pair;
+          if (typeof t1.points !== 'number' || typeof t2.points !== 'number') return;
+          const winnerRosterId = t1.points > t2.points ? t1.roster_id : t2.roster_id;
+          const loserRosterId = t1.points > t2.points ? t2.roster_id : t1.roster_id;
+          const winnerRoster = (season.rosters || []).find(r => r.roster_id === winnerRosterId);
+          const loserRoster = (season.rosters || []).find(r => r.roster_id === loserRosterId);
+          const winnerUserId = winnerRoster?.owner_id;
+          const loserUserId = loserRoster?.owner_id;
+
+          if (winnerUserId) {
+            if (!streaks[winnerUserId]) streaks[winnerUserId] = { current: 0, longest: 0, atSeason: null, atWeek: null };
+            streaks[winnerUserId].current++;
+            if (streaks[winnerUserId].current > streaks[winnerUserId].longest) {
+              streaks[winnerUserId].longest = streaks[winnerUserId].current;
+              streaks[winnerUserId].atSeason = season.season;
+              streaks[winnerUserId].atWeek = parseInt(week, 10);
+            }
           }
-        }
+          if (loserUserId) {
+            if (!streaks[loserUserId]) streaks[loserUserId] = { current: 0, longest: 0, atSeason: null, atWeek: null };
+            streaks[loserUserId].current = 0;
+          }
+        });
       });
     });
 
-    let longestStreak = { team: null, streak: 0 };
-    Object.entries(teamStreaks).forEach(([rosterId, data]) => {
-      if (data.longest > longestStreak.streak) {
-        longestStreak = { team: parseInt(rosterId), streak: data.longest };
+    let best = null;
+    Object.entries(streaks).forEach(([userId, data]) => {
+      if (data.longest > 0 && (!best || data.longest > best.longest)) {
+        best = { userId, ...data };
       }
     });
+    return best ? { ...best, name: getCurrentDisplayName(best.userId) } : null;
+  }, [allSeasons]);
 
-    return longestStreak;
-  };
-
-  const highestScore = calculateHighestScore();
-  const longestStreak = calculateLongestStreak();
+  const championsBySeason = React.useMemo(() => {
+    return allSeasons
+      .map(s => ({ season: s.season, champ: getChampionForSeason(s) }))
+      .filter(x => x.champ)
+      .sort((a, b) => parseInt(b.season, 10) - parseInt(a.season, 10));
+  }, [allSeasons]);
 
   return (
     <div className="space-y-6 sm:space-y-8">
-      <h1 className="text-2xl sm:text-3xl font-bold">League History</h1>
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <h1 className="text-2xl sm:text-3xl font-bold">League History</h1>
+        {historyLoading && (
+          <span className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Loading past seasons in the background...</span>
+        )}
+      </div>
       
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 sm:gap-6">
         <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-yellow-500`}>
           <Crown className="w-12 h-12 text-yellow-500 mx-auto mb-2" />
-          <h3 className="font-bold text-lg mb-2">League Champion 👑</h3>
-          {championName ? (
+          <h3 className="font-bold text-lg mb-2">Last Year's Champion 👑</h3>
+          {lastYearChampion ? (
             <>
-              <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{championName}</p>
-              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>{leagueData?.season} Season</p>
+              <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{lastYearChampion.name}</p>
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>{lastYearChampion.season} Season</p>
             </>
           ) : (
+            <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+              {historyLoading ? 'Still loading past seasons...' : 'No completed season on record yet'}
+            </p>
+          )}
+        </div>
+
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-amber-500`}>
+          <Trophy className="w-12 h-12 text-amber-500 mx-auto mb-2" />
+          <h3 className="font-bold text-lg mb-2">Most Championships</h3>
+          {mostChampionships ? (
             <>
-              <p className="text-2xl font-bold text-yellow-600 dark:text-yellow-400">{leagueData?.season || 'This'} Season</p>
+              <p className="text-2xl font-bold text-amber-600 dark:text-amber-400">{mostChampionships.names.join(' & ')}</p>
               <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>
-                {leagueData?.status === 'complete' ? "Season complete - championship result not available from the API" :
-                 leagueData?.status === 'post_season' ? 'Playoffs in progress!' :
-                 leagueData?.status === 'in_season' ? 'Regular season in progress...' :
-                 leagueData?.status === 'drafting' ? 'Draft in progress...' :
-                 'Season not started'}
+                {mostChampionships.count} title{mostChampionships.count > 1 ? 's' : ''}
               </p>
             </>
+          ) : (
+            <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+              {historyLoading ? 'Still loading past seasons...' : 'No completed season on record yet'}
+            </p>
           )}
         </div>
 
         <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-blue-500`}>
-          <Trophy className="w-12 h-12 text-blue-500 mx-auto mb-2" />
-          <h3 className="font-bold text-lg mb-2">Highest Score</h3>
-          {highestScore.team ? (
+          <BarChart3 className="w-12 h-12 text-blue-500 mx-auto mb-2" />
+          <h3 className="font-bold text-lg mb-2">Highest Score Ever</h3>
+          {highestScoreEver ? (
             <>
-              <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{highestScore.score.toFixed(2)} pts</p>
-              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>
-                {getTeamName(highestScore.team)}
-              </p>
-              <p className="text-xs text-gray-500">Week {highestScore.week}</p>
+              <p className="text-2xl font-bold text-blue-600 dark:text-blue-400">{highestScoreEver.points.toFixed(2)} pts</p>
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>{highestScoreEver.team}</p>
+              <p className="text-xs text-gray-500">{highestScoreEver.season} Season, Week {highestScoreEver.week}</p>
             </>
           ) : (
             <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm`}>No data yet</p>
@@ -1684,19 +1863,35 @@ function HistoryPage({ darkMode, rosters, users, allMatchups, leagueData, champi
 
         <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-6 text-center border-2 border-green-500`}>
           <TrendingUp className="w-12 h-12 text-green-500 mx-auto mb-2" />
-          <h3 className="font-bold text-lg mb-2">Longest Win Streak</h3>
-          {longestStreak.team ? (
+          <h3 className="font-bold text-lg mb-2">Longest Win Streak Ever</h3>
+          {longestStreakEver ? (
             <>
-              <p className="text-2xl font-bold text-green-600 dark:text-green-400">{longestStreak.streak} games</p>
-              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>
-                {getTeamName(longestStreak.team)}
-              </p>
+              <p className="text-2xl font-bold text-green-600 dark:text-green-400">{longestStreakEver.longest} games</p>
+              <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'} mt-1`}>{longestStreakEver.name}</p>
+              <p className="text-xs text-gray-500">Reached {longestStreakEver.atSeason} Season, Week {longestStreakEver.atWeek}</p>
             </>
           ) : (
             <p className={`${darkMode ? 'text-gray-400' : 'text-gray-600'} text-sm`}>No data yet</p>
           )}
         </div>
       </div>
+
+      {championsBySeason.length > 0 && (
+        <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
+          <h2 className="text-xl sm:text-2xl font-bold mb-4">Champions by Season</h2>
+          <div className="space-y-2">
+            {championsBySeason.map(({ season, champ }) => (
+              <div key={season} className={`flex items-center justify-between p-3 rounded ${darkMode ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
+                <span className="font-semibold">{season}</span>
+                <span className="flex items-center gap-2">
+                  <Crown className="w-4 h-4 text-yellow-500" />
+                  {champ.name}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className={`${darkMode ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-md p-4 sm:p-6`}>
         <h2 className="text-xl sm:text-2xl font-bold mb-4">{leagueData?.season || 'This Season'} Week-by-Week</h2>
